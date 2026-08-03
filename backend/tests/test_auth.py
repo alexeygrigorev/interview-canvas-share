@@ -5,6 +5,21 @@ from backend.app.store import UserRecord
 from .conftest import login
 
 
+def test_frontend_development_origin_is_allowed(client: TestClient) -> None:
+    response = client.options(
+        "/v1/auth/login",
+        headers={
+            "Origin": "http://localhost:8081",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:8081"
+    assert response.headers["access-control-allow-credentials"] == "true"
+
+
 def test_protected_endpoints_require_a_bearer_token(client: TestClient) -> None:
     response = client.get("/v1/me")
 
