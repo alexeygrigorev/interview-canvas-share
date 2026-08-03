@@ -17,7 +17,8 @@ export function useRoomPresence(sessionId: string, me: Participant | null) {
     );
     return () => {
       clearInterval(beat);
-      publish({ type: "presence_leave", sessionId, participantId: me.id });
+      // React Strict Mode rehearses effect cleanup immediately after mounting.
+      // Leaving is a persistent membership change and must only be explicit.
     };
   }, [sessionId, me]);
 
