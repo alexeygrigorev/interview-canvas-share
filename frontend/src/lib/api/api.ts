@@ -8,10 +8,8 @@ import type {
   User,
 } from "./types";
 
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8091").replace(
-  /\/$/,
-  "",
-);
+const DEFAULT_API_BASE_URL = import.meta.env.DEV ? "http://localhost:8091" : "";
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE_URL).replace(/\/$/, "");
 const DEV_EMAIL = import.meta.env.VITE_API_EMAIL ?? "avery@northwind.dev";
 const DEV_PASSWORD = import.meta.env.VITE_API_PASSWORD ?? "demo-password";
 const ACCESS_TOKEN_KEY = "sdip.access-token";
@@ -161,7 +159,7 @@ interface RoomConnection {
 const rooms = new Map<string, RoomConnection>();
 
 function websocketUrl(sessionId: string) {
-  const url = new URL(API_BASE_URL);
+  const url = new URL(API_BASE_URL || window.location.origin);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.pathname = `${url.pathname.replace(/\/$/, "")}/v1/sessions/${encodeURIComponent(sessionId)}/realtime`;
   url.search = "";

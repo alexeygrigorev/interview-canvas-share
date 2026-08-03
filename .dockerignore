@@ -1,0 +1,11 @@
+.git
+.gitignore
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/node_modules
+frontend/.output
+frontend/dist
+backend/.venv
+backend/*.db

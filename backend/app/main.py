@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .errors import ApiException
@@ -27,7 +28,10 @@ def _validation_message(exc: RequestValidationError) -> str:
     return f"{location}: {message}" if location else message
 
 
-def create_app(store: DatabaseStore | None = None) -> FastAPI:
+def create_app(
+    store: DatabaseStore | None = None,
+    static_dir: str | Path | None = None,
+) -> FastAPI:
     application = FastAPI(
         title="System Design Interview Platform API",
         version="1.0.0",
@@ -226,6 +230,25 @@ def create_app(store: DatabaseStore | None = None) -> FastAPI:
         return schema
 
     application.openapi = custom_openapi  # type: ignore[method-assign]
+
+    frontend_dir = Path(
+        static_dir or os.getenv("SDIP_STATIC_DIR", Path(__file__).parent / "static")
+    ).resolve()
+    frontend_index = frontend_dir / "index.html"
+    if frontend_index.is_file():
+
+        @application.get("/{path:path}", include_in_schema=False)
+        async def serve_frontend(path: str) -> FileResponse:
+            # API typos must retain the API's JSON 404 response rather than
+            # falling through to the SPA shell.
+            if path == "v1" or path.startswith("v1/"):
+                raise HTTPException(status_code=404, detail="Not Found")
+
+            requested_file = (frontend_dir / path).resolve()
+            if requested_file.is_relative_to(frontend_dir) and requested_file.is_file():
+                return FileResponse(requested_file)
+            return FileResponse(frontend_index)
+
     return application
 
 
