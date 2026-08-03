@@ -2,8 +2,9 @@
 
 from fastapi import APIRouter, Depends, Response
 
-from ..models import JoinRequest, JoinResponse, TokenInspection
+from ..models import JoinRequest, JoinResponse, PresenceUpdateMessage, TokenInspection
 from ..store import GUEST_COOKIE_NAME, GUEST_SESSION_TTL, InMemoryStore, get_store
+from .realtime import broadcast_message
 
 router = APIRouter(prefix="/v1/join", tags=["Guest access"])
 
@@ -14,7 +15,7 @@ def inspect_token(token: str, store: InMemoryStore = Depends(get_store)) -> Toke
 
 
 @router.post("/{token}", response_model=JoinResponse, operation_id="joinGuest")
-def join_guest(
+async def join_guest(
     token: str,
     payload: JoinRequest,
     response: Response,
@@ -28,5 +29,13 @@ def join_guest(
         httponly=True,
         samesite="lax",
         path="/",
+    )
+    await broadcast_message(
+        result.session.id,
+        PresenceUpdateMessage(
+            type="presence_update",
+            sessionId=result.session.id,
+            participant=result.participant,
+        ),
     )
     return JoinResponse(participant=result.participant, session=result.session)

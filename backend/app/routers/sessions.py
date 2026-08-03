@@ -11,13 +11,17 @@ from ..models import (
     CreateSessionRequest,
     GuestLink,
     InterviewSession,
+    PermissionChangedMessage,
     SessionDetail,
+    SessionEndedMessage,
     SessionListItem,
+    TrueResponse,
     UpdateSessionRequest,
     User,
 )
 from ..store import InMemoryStore, get_store
 from .dependencies import require_session_for_principal, require_session_manager
+from .realtime import broadcast_message
 
 router = APIRouter(prefix="/v1/sessions", tags=["Sessions"])
 
@@ -72,27 +76,42 @@ def _transition(
 # Keep the static lifecycle routes before /{id}; otherwise Starlette can match
 # the dynamic route first and return a 405 for a valid POST /start-style path.
 @router.post("/{id}/start", response_model=InterviewSession, operation_id="startSession")
-def start_session(
+async def start_session(
     context: tuple[InterviewSession, User, InMemoryStore] = Depends(require_session_manager),
 ) -> InterviewSession:
     session, current_user, store = context
-    return _transition(session.id, "live", {"draft"}, session, current_user, store)
+    updated = _transition(session.id, "live", {"draft"}, session, current_user, store)
+    await broadcast_message(
+        session.id,
+        PermissionChangedMessage(type="permission_changed", sessionId=session.id, session=updated),
+    )
+    return updated
 
 
 @router.post("/{id}/end", response_model=InterviewSession, operation_id="endSession")
-def end_session(
+async def end_session(
     context: tuple[InterviewSession, User, InMemoryStore] = Depends(require_session_manager),
 ) -> InterviewSession:
     session, current_user, store = context
-    return _transition(session.id, "ended", {"live"}, session, current_user, store)
+    updated = _transition(session.id, "ended", {"live"}, session, current_user, store)
+    await broadcast_message(
+        session.id,
+        SessionEndedMessage(type="session_ended", sessionId=session.id),
+    )
+    return updated
 
 
 @router.post("/{id}/archive", response_model=InterviewSession, operation_id="archiveSession")
-def archive_session(
+async def archive_session(
     context: tuple[InterviewSession, User, InMemoryStore] = Depends(require_session_manager),
 ) -> InterviewSession:
     session, current_user, store = context
-    return _transition(session.id, "archived", {"ended"}, session, current_user, store)
+    updated = _transition(session.id, "archived", {"ended"}, session, current_user, store)
+    await broadcast_message(
+        session.id,
+        PermissionChangedMessage(type="permission_changed", sessionId=session.id, session=updated),
+    )
+    return updated
 
 
 @router.post("/{id}/duplicate", response_model=InterviewSession, operation_id="duplicateSession")
@@ -127,7 +146,7 @@ def create_guest_link(
 
 @router.delete(
     "/{id}/guest-links/{linkId}",
-    response_model=bool,
+    response_model=TrueResponse,
     operation_id="revokeGuestLink",
     tags=["Guest access"],
 )
@@ -154,7 +173,7 @@ def get_session(
 
 
 @router.patch("/{id}", response_model=InterviewSession, operation_id="updateSession")
-def update_session(
+async def update_session(
     payload: UpdateSessionRequest,
     context: tuple[InterviewSession, User, InMemoryStore] = Depends(require_session_manager),
 ) -> InterviewSession:
@@ -163,4 +182,8 @@ def update_session(
     updated = store.update_session(session.id, changes, current_user.id)
     if updated is None:
         raise not_found("session_not_found", "This interview does not exist.")
+    await broadcast_message(
+        session.id,
+        PermissionChangedMessage(type="permission_changed", sessionId=session.id, session=updated),
+    )
     return updated

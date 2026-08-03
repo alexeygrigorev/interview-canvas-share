@@ -19,6 +19,9 @@ class ApiError(APIModel):
     message: str
 
 
+TrueResponse = Literal[True]
+
+
 class User(BaseModel):
     id: str
     email: EmailStr

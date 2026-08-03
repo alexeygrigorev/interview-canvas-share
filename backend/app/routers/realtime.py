@@ -53,6 +53,15 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+async def broadcast_message(session_id: str, message: object) -> None:
+    """Publish a validated server message to every connected room client."""
+
+    await manager.broadcast(
+        session_id,
+        message.model_dump(mode="json", by_alias=True),  # type: ignore[union-attr]
+    )
+
+
 def _websocket_error_code(error: ApiException) -> int:
     return {
         401: 4401,

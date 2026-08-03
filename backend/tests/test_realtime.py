@@ -40,3 +40,22 @@ def test_realtime_rejects_server_generated_client_messages(client: TestClient) -
             }
         )
         assert websocket.receive_json()["code"] == "validation_error"
+
+
+def test_session_updates_are_published_to_room_clients(client: TestClient) -> None:
+    token = login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    with client.websocket_connect(
+        "/v1/sessions/ses_url_shortener/realtime",
+        headers=headers,
+    ) as websocket:
+        response = client.patch(
+            "/v1/sessions/ses_url_shortener",
+            headers=headers,
+            json={"cursors_visible": False},
+        )
+        assert response.status_code == 200
+        event = websocket.receive_json()
+        assert event["type"] == "permission_changed"
+        assert event["sessionId"] == "ses_url_shortener"
+        assert event["session"]["cursors_visible"] is False

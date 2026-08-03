@@ -108,6 +108,18 @@ def create_app(store: InMemoryStore | None = None) -> FastAPI:
                 "message": {"type": "string", "description": "Human-readable error message."},
             },
         }
+        security_schemes = schema.setdefault("components", {}).setdefault("securitySchemes", {})
+        if "bearerAuth" in security_schemes:
+            security_schemes["bearerAuth"].update(
+                {
+                    "bearerFormat": "JWT",
+                    "description": "Authenticated interviewer, owner, or observer access token.",
+                }
+            )
+        if "guestSession" in security_schemes:
+            security_schemes["guestSession"]["description"] = (
+                "Short-lived session credential issued after a successful guest join."
+            )
         schema["security"] = [{"bearerAuth": []}]
         schema.setdefault("components", {}).setdefault("parameters", {}).update(
             {

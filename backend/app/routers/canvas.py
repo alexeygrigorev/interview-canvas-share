@@ -6,9 +6,10 @@ from fastapi import APIRouter, Depends
 
 from ..auth import Principal
 from ..errors import forbidden, not_found
-from ..models import CanvasDocument, SaveCanvasRequest
+from ..models import CanvasDocument, DocumentUpdateMessage, SaveCanvasRequest
 from ..store import InMemoryStore
 from .dependencies import require_session_for_principal
+from .realtime import broadcast_message
 
 router = APIRouter(prefix="/v1/sessions", tags=["Canvas"])
 
@@ -25,7 +26,7 @@ def get_canvas(
 
 
 @router.put("/{id}/canvas", response_model=datetime, operation_id="saveCanvas")
-def save_canvas(
+async def save_canvas(
     payload: SaveCanvasRequest,
     context: tuple[object, Principal, InMemoryStore] = Depends(require_session_for_principal),
 ) -> datetime:
@@ -41,4 +42,13 @@ def save_canvas(
     updated_at = store.save_canvas(session.id, payload.elements, payload.actor)
     if updated_at is None:
         raise not_found("canvas_not_found", "Canvas unavailable.")
+    await broadcast_message(
+        session.id,
+        DocumentUpdateMessage(
+            type="document_update",
+            sessionId=session.id,
+            elements=payload.elements,
+            actor=payload.actor,
+        ),
+    )
     return updated_at

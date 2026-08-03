@@ -4,24 +4,30 @@ from fastapi import APIRouter, Depends
 
 from ..auth import Principal, get_current_user
 from ..errors import forbidden, not_found
-from ..models import Participant, User
+from ..models import Participant, PresenceLeaveMessage, PresenceUpdateMessage, TrueResponse, User
 from ..store import InMemoryStore, get_store
 from .dependencies import require_session_for_principal
+from .realtime import broadcast_message
 
 router = APIRouter(prefix="/v1/sessions", tags=["Participants"])
 
 
 @router.post("/{id}/participants", response_model=Participant, operation_id="joinAsOwner")
-def join_as_owner(
+async def join_as_owner(
     id: str,
     current_user: User = Depends(get_current_user),
     store: InMemoryStore = Depends(get_store),
 ) -> Participant:
-    return store.join_authenticated_participant(id, current_user.id)
+    participant = store.join_authenticated_participant(id, current_user.id)
+    await broadcast_message(
+        id,
+        PresenceUpdateMessage(type="presence_update", sessionId=id, participant=participant),
+    )
+    return participant
 
 
-@router.delete("/{id}/participants/{pid}", response_model=bool, operation_id="removeParticipant")
-def remove_participant(
+@router.delete("/{id}/participants/{pid}", response_model=TrueResponse, operation_id="removeParticipant")
+async def remove_participant(
     pid: str,
     context: tuple[object, Principal, InMemoryStore] = Depends(require_session_for_principal),
 ) -> bool:
@@ -42,4 +48,12 @@ def remove_participant(
     removed = store.leave_participant(session.id, target.id, actor)
     if removed is None:
         raise not_found("participant_not_found", "This participant does not exist in the interview.")
+    await broadcast_message(
+        session.id,
+        PresenceLeaveMessage(
+            type="presence_leave",
+            sessionId=session.id,
+            participantId=target.id,
+        ),
+    )
     return True
