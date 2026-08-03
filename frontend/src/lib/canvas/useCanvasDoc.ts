@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CanvasElement } from "@/lib/api/types";
-import { api, subscribe } from "@/lib/api/api";
+import { api, publish, subscribe } from "@/lib/api/api";
 
 export type SaveState = "saved" | "saving" | "pending" | "error";
 
@@ -59,49 +59,53 @@ export function useCanvasDoc(sessionId: string, actorId: string, canEdit: boolea
     timer.current = setTimeout(flush, 900);
   }, [flush]);
 
+  const publishUpdate = useCallback(
+    (next: CanvasElement[]) => {
+      latest.current = next;
+      setElements(next);
+      publish({
+        type: "document_update",
+        sessionId,
+        elements: next,
+        actor: actorId,
+      });
+      scheduleSave();
+    },
+    [actorId, scheduleSave, sessionId],
+  );
+
   /** Commit a persistent operation. */
   const commit = useCallback(
     (updater: (prev: CanvasElement[]) => CanvasElement[], recordHistory = true) => {
       if (!canEdit) return;
-      setElements((prev) => {
-        const next = updater(prev);
-        if (next === prev) return prev;
-        if (recordHistory) {
-          history.current.past.push(prev);
-          if (history.current.past.length > 100) history.current.past.shift();
-          history.current.future = [];
-        }
-        latest.current = next;
-        scheduleSave();
-        return next;
-      });
+      const prev = latest.current;
+      const next = updater(prev);
+      if (next === prev) return;
+      if (recordHistory) {
+        history.current.past.push(prev);
+        if (history.current.past.length > 100) history.current.past.shift();
+        history.current.future = [];
+      }
+      publishUpdate(next);
     },
-    [canEdit, scheduleSave],
+    [canEdit, publishUpdate],
   );
 
   const undo = useCallback(() => {
     if (!canEdit) return;
-    setElements((prev) => {
-      const past = history.current.past.pop();
-      if (!past) return prev;
-      history.current.future.push(prev);
-      latest.current = past;
-      scheduleSave();
-      return past;
-    });
-  }, [canEdit, scheduleSave]);
+    const past = history.current.past.pop();
+    if (!past) return;
+    history.current.future.push(latest.current);
+    publishUpdate(past);
+  }, [canEdit, publishUpdate]);
 
   const redo = useCallback(() => {
     if (!canEdit) return;
-    setElements((prev) => {
-      const next = history.current.future.pop();
-      if (!next) return prev;
-      history.current.past.push(prev);
-      latest.current = next;
-      scheduleSave();
-      return next;
-    });
-  }, [canEdit, scheduleSave]);
+    const next = history.current.future.pop();
+    if (!next) return;
+    history.current.past.push(latest.current);
+    publishUpdate(next);
+  }, [canEdit, publishUpdate]);
 
   return { elements, setElements, commit, undo, redo, loaded, saveState, flush };
 }
