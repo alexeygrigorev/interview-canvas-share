@@ -36,7 +36,10 @@ function NewInterview() {
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim()) return toast.error("A title is required");
+    if (!title.trim()) {
+      toast.error("A title is required");
+      return;
+    }
     setBusy(true);
     const session = await api.createSession({
       title: title.trim(),
