@@ -48,6 +48,7 @@ export interface Participant {
   joined_at: string;
   left_at: string | null;
   connection: "connected" | "reconnecting" | "offline";
+  cursor?: { x: number; y: number } | null;
 }
 
 export interface CanvasDocument {

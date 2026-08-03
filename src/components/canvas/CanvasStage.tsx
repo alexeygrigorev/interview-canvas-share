@@ -114,29 +114,16 @@ export function CanvasStage(props: Props) {
         clipboard.current = elements.filter((el) => selection.includes(el.id));
       }
       if (mod && e.key.toLowerCase() === "v" && clipboard.current.length && canEdit) {
-        const copies = clipboard.current
-          .filter((el) => el.kind !== "connector")
-          .map((el) => ({
-            ...el,
-            id: `el_${Math.random().toString(36).slice(2, 10)}`,
-            ...(el.kind === "stroke"
-              ? { points: el.points.map((p, i) => p + (i % 2 === 0 ? 24 : 24)) }
-              : { x: el.x + 24, y: el.y + 24 }),
-          })) as CanvasElement[];
+        const copies = clipboard.current.map((el) => offsetCopy(el, 24)).filter(Boolean) as CanvasElement[];
         commit((prev) => [...prev, ...copies]);
         setSelection(copies.map((c) => c.id));
       }
       if (mod && e.key.toLowerCase() === "d" && selection.length && canEdit) {
         e.preventDefault();
         const copies = elements
-          .filter((el) => selection.includes(el.id) && el.kind !== "connector")
-          .map((el) => ({
-            ...el,
-            id: `el_${Math.random().toString(36).slice(2, 10)}`,
-            ...(el.kind === "stroke"
-              ? { points: el.points.map((p) => p + 24) }
-              : { x: el.x + 24, y: el.y + 24 }),
-          })) as CanvasElement[];
+          .filter((el) => selection.includes(el.id))
+          .map((el) => offsetCopy(el, 24))
+          .filter(Boolean) as CanvasElement[];
         commit((prev) => [...prev, ...copies]);
         setSelection(copies.map((c) => c.id));
       }
