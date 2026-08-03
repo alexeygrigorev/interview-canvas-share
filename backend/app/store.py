@@ -1,23 +1,39 @@
-"""Thread-safe in-memory data store and deterministic development seed data."""
+"""Database-backed repository and deterministic development seed data."""
 
 from __future__ import annotations
 
 import hashlib
 import secrets
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from hmac import compare_digest
-from threading import RLock
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from pwdlib import PasswordHash
+from sqlalchemy import Select, func, or_, select, update
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, sessionmaker
 from starlette.requests import HTTPConnection
 
+from .database import (
+    AuditEventRow,
+    Base,
+    CanvasRow,
+    GuestLinkRow,
+    GuestSessionRow,
+    InterviewSessionRow,
+    ParticipantRow,
+    UserRow,
+    create_database_engine,
+    create_session_factory,
+)
 from .errors import conflict, forbidden, gone, not_found
 from .models import (
     AuditEvent,
     CanvasDocument,
     CanvasElement,
+    Cursor,
     GuestLink,
     GuestRole,
     InterviewSession,
@@ -45,7 +61,13 @@ SEED_GUEST_TOKEN = "demo-url-shortener-guest-token"
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
+
+
+def _aware(value: datetime | None) -> datetime | None:
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
 
 
 def _id(prefix: str) -> str:
@@ -76,300 +98,303 @@ class UserRecord:
 
 
 @dataclass(slots=True)
-class GuestLinkRecord:
-    id: str
-    session_id: str
-    token_hash: str
-    role_granted: GuestRole
-    expires_at: datetime | None
-    max_uses: int | None
-    revoked_at: datetime | None
-    created_at: datetime
-
-    def public(self, token: str | None = None) -> GuestLink:
-        return GuestLink(
-            id=self.id,
-            session_id=self.session_id,
-            # A token is returned when it is created or inspected with the
-            # plaintext credential. It is intentionally redacted in stored
-            # session relations because the store retains only token_hash.
-            token=token if token is not None else "[redacted]",
-            role_granted=self.role_granted,
-            expires_at=self.expires_at,
-            max_uses=self.max_uses,
-            revoked_at=self.revoked_at,
-            created_at=self.created_at,
-        )
-
-
-@dataclass(slots=True)
-class GuestSessionRecord:
-    token_hash: str
-    participant_id: str
-    expires_at: datetime
-
-
-@dataclass(slots=True)
 class GuestJoinResult:
     participant: Participant
     session: InterviewSession
     cookie_value: str
 
 
-class InMemoryStore:
-    """A small repository abstraction that can be replaced by a database later."""
+class DatabaseStore:
+    """Synchronous repository backed by any SQLAlchemy-supported database."""
 
-    def __init__(self) -> None:
-        self.lock = RLock()
-        self.users: dict[str, UserRecord] = {}
-        self.sessions: dict[str, InterviewSession] = {}
-        self.links: dict[str, GuestLinkRecord] = {}
-        self.participants: dict[str, Participant] = {}
-        self.canvases: dict[str, CanvasDocument] = {}
-        self.audit_events: list[AuditEvent] = []
-        self.guest_sessions: dict[str, GuestSessionRecord] = {}
+    def __init__(self, engine: Engine):
+        self.engine = engine
+        self.session_factory: sessionmaker[Session] = create_session_factory(engine)
+        Base.metadata.create_all(engine)
 
     @classmethod
-    def seeded(cls) -> "InMemoryStore":
-        """Create the development store with users, sessions, and active rooms."""
+    def from_url(cls, url: str | None = None) -> DatabaseStore:
+        return cls(create_database_engine(url))
 
-        store = cls()
-        password_hash = PasswordHash.recommended()
-        created = utcnow()
-
-        store._add_user(
-            UserRecord(
-                id="usr_avery",
-                email="avery@northwind.dev",
-                display_name="Avery Chen",
-                organization_id="org_northwind",
-                created_at=created - timedelta(days=90),
-                password_hash=password_hash.hash(SEED_PASSWORD),
-            )
-        )
-        store._add_user(
-            UserRecord(
-                id="usr_jordan",
-                email="jordan@northwind.dev",
-                display_name="Jordan Lee",
-                organization_id="org_northwind",
-                created_at=created - timedelta(days=70),
-                password_hash=password_hash.hash(SEED_PASSWORD),
-            )
-        )
-        store._add_user(
-            UserRecord(
-                id="usr_priya",
-                email="priya@northwind.dev",
-                display_name="Priya Shah",
-                organization_id="org_northwind",
-                created_at=created - timedelta(days=45),
-                password_hash=password_hash.hash(SEED_PASSWORD),
-            )
-        )
-
-        live_created = created - timedelta(hours=2)
-        live_started = created - timedelta(hours=1, minutes=45)
-        live_updated = created - timedelta(minutes=3)
-        draft_created = created - timedelta(days=1)
-        ended_created = created - timedelta(days=6)
-        archived_created = created - timedelta(days=21)
-
-        store._add_session(
-            InterviewSession(
-                id="ses_url_shortener",
-                owner_user_id="usr_avery",
-                title="Senior Backend — Design a URL shortener",
-                prompt=(
-                    "Design a URL shortening service handling 100M new links/day with analytics "
-                    "and custom aliases. Discuss data model, key generation, caching, and read scaling."
-                ),
-                state="live",
-                candidate_editing_enabled=True,
-                cursors_visible=True,
-                duration_minutes=60,
-                scheduled_at=live_created,
-                started_at=live_started,
-                ended_at=None,
-                created_at=live_created,
-                updated_at=live_updated,
-            )
-        )
-        store._add_session(
-            InterviewSession(
-                id="ses_global_chat",
-                owner_user_id="usr_jordan",
-                title="Staff — Global chat infrastructure",
-                prompt=(
-                    "Design a realtime chat platform for 50M DAU with presence, delivery receipts, "
-                    "and multi-region failover."
-                ),
-                state="draft",
-                candidate_editing_enabled=True,
-                cursors_visible=True,
-                duration_minutes=75,
-                scheduled_at=created + timedelta(days=2),
-                started_at=None,
-                ended_at=None,
-                created_at=draft_created,
-                updated_at=draft_created,
-            )
-        )
-        store._add_session(
-            InterviewSession(
-                id="ses_ride_matching",
-                owner_user_id="usr_avery",
-                title="Senior — Ride matching service",
-                prompt=(
-                    "Design the dispatch and matching subsystem for a ride-hailing product in a dense "
-                    "metro area."
-                ),
-                state="ended",
-                candidate_editing_enabled=True,
-                cursors_visible=True,
-                duration_minutes=60,
-                scheduled_at=ended_created,
-                started_at=ended_created + timedelta(minutes=5),
-                ended_at=ended_created + timedelta(hours=1, minutes=2),
-                created_at=ended_created,
-                updated_at=ended_created + timedelta(hours=1, minutes=2),
-            )
-        )
-        store._add_session(
-            InterviewSession(
-                id="ses_metrics_pipeline",
-                owner_user_id="usr_avery",
-                title="Platform — Metrics ingestion pipeline",
-                prompt=(
-                    "Design a metrics ingestion and query pipeline handling 5M datapoints/sec with "
-                    "13-month retention."
-                ),
-                state="archived",
-                candidate_editing_enabled=False,
-                cursors_visible=False,
-                duration_minutes=45,
-                scheduled_at=archived_created,
-                started_at=archived_created,
-                ended_at=archived_created + timedelta(minutes=43),
-                created_at=archived_created,
-                updated_at=archived_created + timedelta(minutes=43),
-            )
-        )
-
-        for session_id in store.sessions:
-            store.canvases[session_id] = CanvasDocument(
-                id=f"doc_{session_id.removeprefix('ses_')}",
-                session_id=session_id,
-                schema_version=1,
-                elements=[],
-                updated_at=store.sessions[session_id].updated_at,
-            )
-
-        # Give the active room a small, valid architecture sketch so a real
-        # frontend immediately has something useful to render.
-        store.canvases["ses_url_shortener"] = CanvasDocument(
-            id="doc_url_shortener",
-            session_id="ses_url_shortener",
-            schema_version=1,
-            elements=store._seed_canvas_elements(live_updated),
-            updated_at=live_updated,
-        )
-
-        store._add_participant(
-            Participant(
-                id="par_avery_url",
-                session_id="ses_url_shortener",
-                user_id="usr_avery",
-                display_name="Avery Chen",
-                role="owner",
-                color=PARTICIPANT_COLORS[0],
-                joined_at=live_started,
-                left_at=None,
-                connection="connected",
-            )
-        )
-        store._add_participant(
-            Participant(
-                id="par_priya_url",
-                session_id="ses_url_shortener",
-                user_id="usr_priya",
-                display_name="Priya Shah",
-                role="interviewer",
-                color=PARTICIPANT_COLORS[3],
-                joined_at=live_started + timedelta(minutes=2),
-                left_at=None,
-                connection="connected",
-            )
-        )
-        store._add_participant(
-            Participant(
-                id="par_sam_url",
-                session_id="ses_url_shortener",
-                user_id=None,
-                display_name="Sam Rivera",
-                role="candidate",
-                color=PARTICIPANT_COLORS[1],
-                joined_at=live_started + timedelta(minutes=5),
-                left_at=None,
-                connection="connected",
-            )
-        )
-        store._add_participant(
-            Participant(
-                id="par_jordan_chat",
-                session_id="ses_global_chat",
-                user_id="usr_jordan",
-                display_name="Jordan Lee",
-                role="owner",
-                color=PARTICIPANT_COLORS[0],
-                joined_at=draft_created,
-                left_at=None,
-                connection="connected",
-            )
-        )
-        store._add_participant(
-            Participant(
-                id="par_avery_ride",
-                session_id="ses_ride_matching",
-                user_id="usr_avery",
-                display_name="Avery Chen",
-                role="owner",
-                color=PARTICIPANT_COLORS[0],
-                joined_at=ended_created + timedelta(minutes=5),
-                left_at=ended_created + timedelta(hours=1, minutes=2),
-                connection="offline",
-            )
-        )
-
-        store._add_link(
-            GuestLinkRecord(
-                id="lnk_url_shortener",
-                session_id="ses_url_shortener",
-                token_hash=hash_credential(SEED_GUEST_TOKEN),
-                role_granted="candidate",
-                expires_at=created + timedelta(days=7),
-                max_uses=10,
-                revoked_at=None,
-                created_at=live_started,
-            )
-        )
-
-        store._record_audit("ses_url_shortener", "session.created", "usr_avery", live_created)
-        store._record_audit("ses_url_shortener", "session.started", "usr_avery", live_started)
-        store._record_audit("ses_url_shortener", "participant.joined:Sam Rivera", "par_sam_url", live_updated)
-        store._record_audit("ses_global_chat", "session.created", "usr_jordan", draft_created)
-        store._record_audit("ses_ride_matching", "session.ended", "usr_avery", ended_created + timedelta(hours=1))
+    @classmethod
+    def seeded(cls, url: str | None = "sqlite://") -> DatabaseStore:
+        store = cls.from_url(url)
+        store.seed()
         return store
 
+    @contextmanager
+    def _transaction(self) -> Iterator[Session]:
+        database = self.session_factory()
+        try:
+            yield database
+            database.commit()
+        except Exception:
+            database.rollback()
+            raise
+        finally:
+            database.close()
+
+    def seed(self) -> None:
+        """Seed an empty database, leaving existing databases untouched."""
+
+        with self._transaction() as database:
+            if database.scalar(select(func.count()).select_from(UserRow)):
+                return
+            password_hash = PasswordHash.recommended()
+            now = utcnow()
+            users = [
+                UserRow(
+                    id="usr_avery",
+                    email="avery@northwind.dev",
+                    display_name="Avery Chen",
+                    organization_id="org_northwind",
+                    created_at=now - timedelta(days=90),
+                    password_hash=password_hash.hash(SEED_PASSWORD),
+                ),
+                UserRow(
+                    id="usr_jordan",
+                    email="jordan@northwind.dev",
+                    display_name="Jordan Lee",
+                    organization_id="org_northwind",
+                    created_at=now - timedelta(days=70),
+                    password_hash=password_hash.hash(SEED_PASSWORD),
+                ),
+                UserRow(
+                    id="usr_priya",
+                    email="priya@northwind.dev",
+                    display_name="Priya Shah",
+                    organization_id="org_northwind",
+                    created_at=now - timedelta(days=45),
+                    password_hash=password_hash.hash(SEED_PASSWORD),
+                ),
+            ]
+            database.add_all(users)
+            live_created = now - timedelta(hours=2)
+            live_started = now - timedelta(hours=1, minutes=45)
+            live_updated = now - timedelta(minutes=3)
+            draft_created = now - timedelta(days=1)
+            ended_created = now - timedelta(days=6)
+            archived_created = now - timedelta(days=21)
+            sessions = [
+                InterviewSessionRow(
+                    id="ses_url_shortener",
+                    owner_user_id="usr_avery",
+                    title="Senior Backend — Design a URL shortener",
+                    prompt="Design a URL shortening service handling 100M new links/day with analytics and custom aliases. Discuss data model, key generation, caching, and read scaling.",
+                    state="live",
+                    candidate_editing_enabled=True,
+                    cursors_visible=True,
+                    duration_minutes=60,
+                    scheduled_at=live_created,
+                    started_at=live_started,
+                    ended_at=None,
+                    created_at=live_created,
+                    updated_at=live_updated,
+                ),
+                InterviewSessionRow(
+                    id="ses_global_chat",
+                    owner_user_id="usr_jordan",
+                    title="Staff — Global chat infrastructure",
+                    prompt="Design a realtime chat platform for 50M DAU with presence, delivery receipts, and multi-region failover.",
+                    state="draft",
+                    candidate_editing_enabled=True,
+                    cursors_visible=True,
+                    duration_minutes=75,
+                    scheduled_at=now + timedelta(days=2),
+                    started_at=None,
+                    ended_at=None,
+                    created_at=draft_created,
+                    updated_at=draft_created,
+                ),
+                InterviewSessionRow(
+                    id="ses_ride_matching",
+                    owner_user_id="usr_avery",
+                    title="Senior — Ride matching service",
+                    prompt="Design the dispatch and matching subsystem for a ride-hailing product in a dense metro area.",
+                    state="ended",
+                    candidate_editing_enabled=True,
+                    cursors_visible=True,
+                    duration_minutes=60,
+                    scheduled_at=ended_created,
+                    started_at=ended_created + timedelta(minutes=5),
+                    ended_at=ended_created + timedelta(hours=1, minutes=2),
+                    created_at=ended_created,
+                    updated_at=ended_created + timedelta(hours=1, minutes=2),
+                ),
+                InterviewSessionRow(
+                    id="ses_metrics_pipeline",
+                    owner_user_id="usr_avery",
+                    title="Platform — Metrics ingestion pipeline",
+                    prompt="Design a metrics ingestion and query pipeline handling 5M datapoints/sec with 13-month retention.",
+                    state="archived",
+                    candidate_editing_enabled=False,
+                    cursors_visible=False,
+                    duration_minutes=45,
+                    scheduled_at=archived_created,
+                    started_at=archived_created,
+                    ended_at=archived_created + timedelta(minutes=43),
+                    created_at=archived_created,
+                    updated_at=archived_created + timedelta(minutes=43),
+                ),
+            ]
+            database.add_all(sessions)
+            database.flush()
+            database.add_all(
+                [
+                    CanvasRow(
+                        id="doc_url_shortener",
+                        session_id="ses_url_shortener",
+                        schema_version=1,
+                        elements=self._seed_canvas_elements(live_updated),
+                        updated_at=live_updated,
+                    ),
+                    CanvasRow(
+                        id="doc_global_chat",
+                        session_id="ses_global_chat",
+                        schema_version=1,
+                        elements=[],
+                        updated_at=draft_created,
+                    ),
+                    CanvasRow(
+                        id="doc_ride_matching",
+                        session_id="ses_ride_matching",
+                        schema_version=1,
+                        elements=[],
+                        updated_at=ended_created + timedelta(hours=1, minutes=2),
+                    ),
+                    CanvasRow(
+                        id="doc_metrics_pipeline",
+                        session_id="ses_metrics_pipeline",
+                        schema_version=1,
+                        elements=[],
+                        updated_at=archived_created + timedelta(minutes=43),
+                    ),
+                ]
+            )
+            database.add_all(
+                [
+                    ParticipantRow(
+                        id="par_avery_url",
+                        session_id="ses_url_shortener",
+                        user_id="usr_avery",
+                        display_name="Avery Chen",
+                        role="owner",
+                        color=PARTICIPANT_COLORS[0],
+                        joined_at=live_started,
+                        left_at=None,
+                        connection="connected",
+                        cursor=None,
+                    ),
+                    ParticipantRow(
+                        id="par_priya_url",
+                        session_id="ses_url_shortener",
+                        user_id="usr_priya",
+                        display_name="Priya Shah",
+                        role="interviewer",
+                        color=PARTICIPANT_COLORS[3],
+                        joined_at=live_started + timedelta(minutes=2),
+                        left_at=None,
+                        connection="connected",
+                        cursor=None,
+                    ),
+                    ParticipantRow(
+                        id="par_sam_url",
+                        session_id="ses_url_shortener",
+                        user_id=None,
+                        display_name="Sam Rivera",
+                        role="candidate",
+                        color=PARTICIPANT_COLORS[1],
+                        joined_at=live_started + timedelta(minutes=5),
+                        left_at=None,
+                        connection="connected",
+                        cursor=None,
+                    ),
+                    ParticipantRow(
+                        id="par_jordan_chat",
+                        session_id="ses_global_chat",
+                        user_id="usr_jordan",
+                        display_name="Jordan Lee",
+                        role="owner",
+                        color=PARTICIPANT_COLORS[0],
+                        joined_at=draft_created,
+                        left_at=None,
+                        connection="connected",
+                        cursor=None,
+                    ),
+                    ParticipantRow(
+                        id="par_avery_ride",
+                        session_id="ses_ride_matching",
+                        user_id="usr_avery",
+                        display_name="Avery Chen",
+                        role="owner",
+                        color=PARTICIPANT_COLORS[0],
+                        joined_at=ended_created + timedelta(minutes=5),
+                        left_at=ended_created + timedelta(hours=1, minutes=2),
+                        connection="offline",
+                        cursor=None,
+                    ),
+                ]
+            )
+            database.add(
+                GuestLinkRow(
+                    id="lnk_url_shortener",
+                    session_id="ses_url_shortener",
+                    token_hash=hash_credential(SEED_GUEST_TOKEN),
+                    role_granted="candidate",
+                    expires_at=now + timedelta(days=7),
+                    max_uses=10,
+                    revoked_at=None,
+                    created_at=live_started,
+                )
+            )
+            self._record_audit(
+                database,
+                "ses_url_shortener",
+                "session.created",
+                "usr_avery",
+                live_created,
+            )
+            self._record_audit(
+                database,
+                "ses_url_shortener",
+                "session.started",
+                "usr_avery",
+                live_started,
+            )
+            self._record_audit(
+                database,
+                "ses_url_shortener",
+                "participant.joined:Sam Rivera",
+                "par_sam_url",
+                live_updated,
+            )
+            self._record_audit(
+                database,
+                "ses_global_chat",
+                "session.created",
+                "usr_jordan",
+                draft_created,
+            )
+            self._record_audit(
+                database,
+                "ses_ride_matching",
+                "session.ended",
+                "usr_avery",
+                ended_created + timedelta(hours=1),
+            )
+
     @staticmethod
-    def _seed_canvas_elements(at: datetime) -> list[CanvasElement]:
+    def _seed_canvas_elements(at: datetime) -> list[dict[str, object]]:
+        common: dict[str, object] = {
+            "created_by": "par_avery_url",
+            "created_at": at.isoformat(),
+            "updated_at": at.isoformat(),
+        }
         return [
             {
+                **common,
                 "id": "elm_client",
                 "kind": "node",
-                "created_by": "par_avery_url",
-                "created_at": at,
-                "updated_at": at,
                 "componentType": "client",
                 "x": 80,
                 "y": 180,
@@ -380,11 +405,9 @@ class InMemoryStore:
                 "color": "#60a5fa",
             },
             {
+                **common,
                 "id": "elm_api",
                 "kind": "node",
-                "created_by": "par_avery_url",
-                "created_at": at,
-                "updated_at": at,
                 "componentType": "service",
                 "x": 340,
                 "y": 180,
@@ -395,11 +418,9 @@ class InMemoryStore:
                 "color": "#5eead4",
             },
             {
+                **common,
                 "id": "elm_cache",
                 "kind": "node",
-                "created_by": "par_avery_url",
-                "created_at": at,
-                "updated_at": at,
                 "componentType": "cache",
                 "x": 650,
                 "y": 90,
@@ -409,11 +430,9 @@ class InMemoryStore:
                 "color": "#fbbf24",
             },
             {
+                **common,
                 "id": "elm_db",
                 "kind": "node",
-                "created_by": "par_avery_url",
-                "created_at": at,
-                "updated_at": at,
                 "componentType": "database",
                 "x": 650,
                 "y": 270,
@@ -423,11 +442,9 @@ class InMemoryStore:
                 "color": "#a78bfa",
             },
             {
+                **common,
                 "id": "elm_client_api",
                 "kind": "connector",
-                "created_by": "par_avery_url",
-                "created_at": at,
-                "updated_at": at,
                 "from": "elm_client",
                 "to": "elm_api",
                 "style": "straight",
@@ -438,11 +455,9 @@ class InMemoryStore:
                 "label": "HTTPS",
             },
             {
+                **common,
                 "id": "elm_api_cache",
                 "kind": "connector",
-                "created_by": "par_avery_url",
-                "created_at": at,
-                "updated_at": at,
                 "from": "elm_api",
                 "to": "elm_cache",
                 "style": "curved",
@@ -453,11 +468,9 @@ class InMemoryStore:
                 "label": "read-through",
             },
             {
+                **common,
                 "id": "elm_api_db",
                 "kind": "connector",
-                "created_by": "par_avery_url",
-                "created_at": at,
-                "updated_at": at,
                 "from": "elm_api",
                 "to": "elm_db",
                 "style": "elbow",
@@ -469,111 +482,200 @@ class InMemoryStore:
             },
         ]
 
-    def _add_user(self, user: UserRecord) -> None:
-        self.users[user.id] = user
+    @staticmethod
+    def _user(row: UserRow) -> UserRecord:
+        return UserRecord(
+            row.id,
+            row.email,
+            row.display_name,
+            row.organization_id,
+            _aware(row.created_at),
+            row.password_hash,
+        )  # type: ignore[arg-type]
 
-    def _add_session(self, session: InterviewSession) -> None:
-        self.sessions[session.id] = session
+    @staticmethod
+    def _session(row: InterviewSessionRow) -> InterviewSession:
+        return InterviewSession.model_validate(
+            {
+                column.name: _aware(getattr(row, column.name))
+                if isinstance(getattr(row, column.name), datetime)
+                else getattr(row, column.name)
+                for column in InterviewSessionRow.__table__.columns
+            }
+        )
 
-    def _add_participant(self, participant: Participant) -> None:
-        self.participants[participant.id] = participant
+    @staticmethod
+    def _participant(row: ParticipantRow) -> Participant:
+        return Participant(
+            id=row.id,
+            session_id=row.session_id,
+            user_id=row.user_id,
+            display_name=row.display_name,
+            role=row.role,
+            color=row.color,
+            joined_at=_aware(row.joined_at),
+            left_at=_aware(row.left_at),
+            connection=row.connection,
+            cursor=Cursor.model_validate(row.cursor) if row.cursor else None,
+        )  # type: ignore[arg-type]
 
-    def _add_link(self, link: GuestLinkRecord) -> None:
-        self.links[link.id] = link
+    @staticmethod
+    def _link(row: GuestLinkRow, token: str = "[redacted]") -> GuestLink:
+        return GuestLink(
+            id=row.id,
+            session_id=row.session_id,
+            token=token,
+            role_granted=row.role_granted,
+            expires_at=_aware(row.expires_at),
+            max_uses=row.max_uses,
+            revoked_at=_aware(row.revoked_at),
+            created_at=_aware(row.created_at),
+        )  # type: ignore[arg-type]
+
+    @staticmethod
+    def _canvas(row: CanvasRow) -> CanvasDocument:
+        return CanvasDocument(
+            id=row.id,
+            session_id=row.session_id,
+            schema_version=row.schema_version,
+            elements=row.elements,
+            updated_at=_aware(row.updated_at),
+        )  # type: ignore[arg-type]
+
+    @staticmethod
+    def _active_participant_query(
+        session_id: str, user_id: str
+    ) -> Select[tuple[ParticipantRow]]:
+        return select(ParticipantRow).where(
+            ParticipantRow.session_id == session_id,
+            ParticipantRow.user_id == user_id,
+            ParticipantRow.left_at.is_(None),
+        )
 
     def _record_audit(
         self,
+        database: Session,
         session_id: str,
         event: str,
         actor: str,
         at: datetime | None = None,
     ) -> None:
-        self.audit_events.insert(
-            0,
-            AuditEvent(
+        database.add(
+            AuditEventRow(
                 id=_id("aud"),
                 session_id=session_id,
                 event=event,
                 at=at or utcnow(),
                 actor=actor,
-            ),
+            )
         )
 
     def record_audit(self, session_id: str, event: str, actor: str) -> None:
-        with self.lock:
-            self._record_audit(session_id, event, actor)
+        with self._transaction() as database:
+            self._record_audit(database, session_id, event, actor)
 
     def get_user(self, user_id: str) -> UserRecord | None:
-        with self.lock:
-            return self.users.get(user_id)
+        with self._transaction() as database:
+            row = database.get(UserRow, user_id)
+            return self._user(row) if row else None
 
     def find_user_by_email(self, email: str) -> UserRecord | None:
-        normalized = email.casefold()
-        with self.lock:
-            return next((user for user in self.users.values() if user.email.casefold() == normalized), None)
+        with self._transaction() as database:
+            row = database.scalar(
+                select(UserRow).where(func.lower(UserRow.email) == email.casefold())
+            )
+            return self._user(row) if row else None
+
+    def _active_link(self, database: Session, session_id: str) -> GuestLinkRow | None:
+        now = utcnow()
+        return database.scalar(
+            select(GuestLinkRow)
+            .where(
+                GuestLinkRow.session_id == session_id,
+                GuestLinkRow.revoked_at.is_(None),
+                or_(GuestLinkRow.expires_at.is_(None), GuestLinkRow.expires_at > now),
+            )
+            .order_by(GuestLinkRow.created_at.desc())
+        )
+
+    def _can_access(
+        self, database: Session, session: InterviewSessionRow, user_id: str
+    ) -> bool:
+        return (
+            session.owner_user_id == user_id
+            or database.scalar(self._active_participant_query(session.id, user_id))
+            is not None
+        )
 
     def list_sessions_for_user(self, user_id: str) -> list[SessionListItem]:
-        with self.lock:
-            visible = [
-                session
-                for session in self.sessions.values()
-                if self.user_can_access(session.id, user_id)
-            ]
-            visible.sort(key=lambda session: session.updated_at, reverse=True)
-            return [self._session_list_item(session) for session in visible]
-
-    def _active_link(self, session_id: str) -> GuestLinkRecord | None:
-        now = utcnow()
-        return next(
-            (
-                link
-                for link in self.links.values()
-                if link.session_id == session_id
-                and link.revoked_at is None
-                and (link.expires_at is None or link.expires_at > now)
-            ),
-            None,
-        )
-
-    def _session_list_item(self, session: InterviewSession) -> SessionListItem:
-        participants = [
-            participant.model_copy(deep=True)
-            for participant in self.participants.values()
-            if participant.session_id == session.id
-        ]
-        link = self._active_link(session.id)
-        return SessionListItem(
-            **session.model_dump(),
-            participants=participants,
-            link=link.public() if link else None,
-        )
+        with self._transaction() as database:
+            rows = database.scalars(
+                select(InterviewSessionRow)
+                .where(
+                    or_(
+                        InterviewSessionRow.owner_user_id == user_id,
+                        InterviewSessionRow.id.in_(
+                            select(ParticipantRow.session_id).where(
+                                ParticipantRow.user_id == user_id,
+                                ParticipantRow.left_at.is_(None),
+                            )
+                        ),
+                    )
+                )
+                .order_by(InterviewSessionRow.updated_at.desc())
+            ).all()
+            result = []
+            for row in rows:
+                participants = [
+                    self._participant(item)
+                    for item in database.scalars(
+                        select(ParticipantRow).where(
+                            ParticipantRow.session_id == row.id
+                        )
+                    ).all()
+                ]
+                link = self._active_link(database, row.id)
+                result.append(
+                    SessionListItem(
+                        **self._session(row).model_dump(),
+                        participants=participants,
+                        link=self._link(link) if link else None,
+                    )
+                )
+            return result
 
     def session_detail(self, session_id: str) -> SessionDetail | None:
-        with self.lock:
-            session = self.sessions.get(session_id)
-            if session is None:
+        with self._transaction() as database:
+            row = database.get(InterviewSessionRow, session_id)
+            if row is None:
                 return None
             participants = [
-                participant.model_copy(deep=True)
-                for participant in self.participants.values()
-                if participant.session_id == session_id and participant.left_at is None
+                self._participant(item)
+                for item in database.scalars(
+                    select(ParticipantRow).where(
+                        ParticipantRow.session_id == session_id,
+                        ParticipantRow.left_at.is_(None),
+                    )
+                ).all()
             ]
-            link = self._active_link(session_id)
+            link = self._active_link(database, session_id)
             return SessionDetail(
-                session=session.model_copy(deep=True),
+                session=self._session(row),
                 participants=participants,
-                link=link.public() if link else None,
+                link=self._link(link) if link else None,
             )
 
     def get_session(self, session_id: str) -> InterviewSession | None:
-        with self.lock:
-            session = self.sessions.get(session_id)
-            return session.model_copy(deep=True) if session else None
+        with self._transaction() as database:
+            row = database.get(InterviewSessionRow, session_id)
+            return self._session(row) if row else None
 
     def get_canvas(self, session_id: str) -> CanvasDocument | None:
-        with self.lock:
-            canvas = self.canvases.get(session_id)
-            return canvas.model_copy(deep=True) if canvas else None
+        with self._transaction() as database:
+            row = database.scalar(
+                select(CanvasRow).where(CanvasRow.session_id == session_id)
+            )
+            return self._canvas(row) if row else None
 
     def create_session(
         self,
@@ -583,9 +685,9 @@ class InMemoryStore:
         duration_minutes: int,
         scheduled_at: datetime | None,
     ) -> InterviewSession:
-        with self.lock:
+        with self._transaction() as database:
             now = utcnow()
-            session = InterviewSession(
+            row = InterviewSessionRow(
                 id=_id("ses"),
                 owner_user_id=owner_user_id,
                 title=title,
@@ -600,87 +702,109 @@ class InMemoryStore:
                 created_at=now,
                 updated_at=now,
             )
-            self.sessions[session.id] = session
-            self.canvases[session.id] = CanvasDocument(
-                id=_id("doc"),
-                session_id=session.id,
-                schema_version=1,
-                elements=[],
-                updated_at=now,
+            database.add(row)
+            database.flush()
+            database.add(
+                CanvasRow(
+                    id=_id("doc"),
+                    session_id=row.id,
+                    schema_version=1,
+                    elements=[],
+                    updated_at=now,
+                )
             )
-            self._record_audit(session.id, "session.created", owner_user_id, now)
-            return session.model_copy(deep=True)
+            self._record_audit(database, row.id, "session.created", owner_user_id, now)
+            return self._session(row)
 
     def update_session(
-        self,
-        session_id: str,
-        changes: dict[str, object],
-        actor: str,
+        self, session_id: str, changes: dict[str, object], actor: str
     ) -> InterviewSession | None:
-        with self.lock:
-            current = self.sessions.get(session_id)
-            if current is None:
+        with self._transaction() as database:
+            row = database.get(InterviewSessionRow, session_id)
+            if row is None:
                 return None
-            updated = current.model_copy(update={**changes, "updated_at": utcnow()})
-            self.sessions[session_id] = updated
-            self._record_audit(session_id, "session.updated", actor)
-            return updated.model_copy(deep=True)
+            for name, value in changes.items():
+                setattr(row, name, value)
+            row.updated_at = utcnow()
+            self._record_audit(database, session_id, "session.updated", actor)
+            database.flush()
+            return self._session(row)
 
-    def transition_session(self, session_id: str, state: str, actor: str) -> InterviewSession | None:
-        with self.lock:
-            current = self.sessions.get(session_id)
-            if current is None:
+    def transition_session(
+        self, session_id: str, state: str, actor: str
+    ) -> InterviewSession | None:
+        with self._transaction() as database:
+            row = database.get(InterviewSessionRow, session_id)
+            if row is None:
                 return None
             now = utcnow()
-            changes: dict[str, object] = {"state": state, "updated_at": now}
+            row.state = state
+            row.updated_at = now
             if state == "live":
-                changes["started_at"] = current.started_at or now
+                row.started_at = row.started_at or now
             elif state == "ended":
-                changes["ended_at"] = now
-            updated = current.model_copy(update=changes)
-            self.sessions[session_id] = updated
-            self._record_audit(session_id, f"session.{state}", actor)
-            return updated.model_copy(deep=True)
+                row.ended_at = now
+            self._record_audit(database, session_id, f"session.{state}", actor)
+            database.flush()
+            return self._session(row)
 
-    def duplicate_session(self, session_id: str, owner_user_id: str) -> InterviewSession | None:
-        with self.lock:
-            source = self.sessions.get(session_id)
+    def duplicate_session(
+        self, session_id: str, owner_user_id: str
+    ) -> InterviewSession | None:
+        with self._transaction() as database:
+            source = database.get(InterviewSessionRow, session_id)
             if source is None:
                 return None
             now = utcnow()
-            copy = source.model_copy(
-                deep=True,
-                update={
-                    "id": _id("ses"),
-                    "owner_user_id": owner_user_id,
-                    "title": f"{source.title} (copy)",
-                    "state": "draft",
-                    "started_at": None,
-                    "ended_at": None,
-                    "created_at": now,
-                    "updated_at": now,
-                },
-            )
-            self.sessions[copy.id] = copy
-            source_canvas = self.canvases.get(session_id)
-            self.canvases[copy.id] = CanvasDocument(
-                id=_id("doc"),
-                session_id=copy.id,
-                schema_version=1,
-                elements=source_canvas.model_copy(deep=True).elements if source_canvas else [],
+            row = InterviewSessionRow(
+                id=_id("ses"),
+                owner_user_id=owner_user_id,
+                title=f"{source.title} (copy)",
+                prompt=source.prompt,
+                state="draft",
+                candidate_editing_enabled=source.candidate_editing_enabled,
+                cursors_visible=source.cursors_visible,
+                duration_minutes=source.duration_minutes,
+                scheduled_at=source.scheduled_at,
+                started_at=None,
+                ended_at=None,
+                created_at=now,
                 updated_at=now,
             )
-            self._record_audit(copy.id, "session.duplicated", owner_user_id, now)
-            return copy.model_copy(deep=True)
+            database.add(row)
+            database.flush()
+            source_canvas = database.scalar(
+                select(CanvasRow).where(CanvasRow.session_id == session_id)
+            )
+            database.add(
+                CanvasRow(
+                    id=_id("doc"),
+                    session_id=row.id,
+                    schema_version=1,
+                    elements=source_canvas.elements if source_canvas else [],
+                    updated_at=now,
+                )
+            )
+            self._record_audit(
+                database, row.id, "session.duplicated", owner_user_id, now
+            )
+            return self._session(row)
 
-    def create_guest_link(self, session_id: str, role_granted: GuestRole, actor: str) -> tuple[GuestLink, str]:
-        with self.lock:
+    def create_guest_link(
+        self, session_id: str, role_granted: GuestRole, actor: str
+    ) -> tuple[GuestLink, str]:
+        with self._transaction() as database:
             now = utcnow()
-            for link in self.links.values():
-                if link.session_id == session_id and link.revoked_at is None:
-                    link.revoked_at = now
+            database.execute(
+                update(GuestLinkRow)
+                .where(
+                    GuestLinkRow.session_id == session_id,
+                    GuestLinkRow.revoked_at.is_(None),
+                )
+                .values(revoked_at=now)
+            )
             raw_token = secrets.token_urlsafe(32)
-            link = GuestLinkRecord(
+            row = GuestLinkRow(
                 id=_id("lnk"),
                 session_id=session_id,
                 token_hash=hash_credential(raw_token),
@@ -690,65 +814,82 @@ class InMemoryStore:
                 revoked_at=None,
                 created_at=now,
             )
-            self.links[link.id] = link
-            self._record_audit(session_id, "link.rotated", actor, now)
-            return link.public(raw_token), raw_token
+            database.add(row)
+            self._record_audit(database, session_id, "link.rotated", actor, now)
+            database.flush()
+            return self._link(row, raw_token), raw_token
 
-    def revoke_guest_link(self, session_id: str, link_id: str, actor: str) -> bool | None:
-        with self.lock:
-            link = self.links.get(link_id)
-            if link is None or link.session_id != session_id:
+    def revoke_guest_link(
+        self, session_id: str, link_id: str, actor: str
+    ) -> bool | None:
+        with self._transaction() as database:
+            row = database.get(GuestLinkRow, link_id)
+            if row is None or row.session_id != session_id:
                 return None
-            if link.revoked_at is None:
-                link.revoked_at = utcnow()
-            self._record_audit(session_id, "link.revoked", actor)
+            row.revoked_at = row.revoked_at or utcnow()
+            self._record_audit(database, session_id, "link.revoked", actor)
             return True
 
-    def _find_guest_link(self, token: str) -> GuestLinkRecord | None:
-        token_hash = hash_credential(token)
-        return next(
-            (link for link in self.links.values() if compare_digest(link.token_hash, token_hash)),
-            None,
-        )
+    def get_guest_link_hash(self, link_id: str) -> str | None:
+        with self._transaction() as database:
+            row = database.get(GuestLinkRow, link_id)
+            return row.token_hash if row else None
 
-    def _validate_guest_token(self, token: str) -> tuple[GuestLinkRecord, InterviewSession, int]:
-        link = self._find_guest_link(token)
+    def _validate_guest_token(
+        self, database: Session, token: str
+    ) -> tuple[GuestLinkRow, InterviewSessionRow, int]:
+        link = database.scalar(
+            select(GuestLinkRow).where(
+                GuestLinkRow.token_hash == hash_credential(token)
+            )
+        )
         if link is None:
             raise not_found("invalid_token", "This invitation link is not valid.")
         if link.revoked_at is not None:
             raise gone("revoked", "This invitation link has been revoked.")
-        if link.expires_at is not None and link.expires_at <= utcnow():
+        if _aware(link.expires_at) is not None and _aware(link.expires_at) <= utcnow():  # type: ignore[operator]
             raise gone("expired", "This invitation link has expired.")
-        session = self.sessions.get(link.session_id)
+        session = database.get(InterviewSessionRow, link.session_id)
         if session is None:
             raise not_found("session_not_found", "This interview no longer exists.")
         if session.state == "archived":
             raise gone("archived", "This interview has been archived.")
         if session.state not in {"draft", "live"}:
-            raise conflict("session_not_joinable", "This interview is no longer accepting participants.")
-        active_count = sum(
-            1
-            for participant in self.participants.values()
-            if participant.session_id == session.id and participant.left_at is None
+            raise conflict(
+                "session_not_joinable",
+                "This interview is no longer accepting participants.",
+            )
+        active_count = (
+            database.scalar(
+                select(func.count())
+                .select_from(ParticipantRow)
+                .where(
+                    ParticipantRow.session_id == session.id,
+                    ParticipantRow.left_at.is_(None),
+                )
+            )
+            or 0
         )
         if link.max_uses is not None and active_count >= link.max_uses:
-            raise conflict("at_capacity", "This interview has reached its participant limit.")
+            raise conflict(
+                "at_capacity", "This interview has reached its participant limit."
+            )
         return link, session, active_count
 
     def inspect_guest_token(self, token: str) -> TokenInspection:
-        with self.lock:
-            link, session, active_count = self._validate_guest_token(token)
+        with self._transaction() as database:
+            link, session, active_count = self._validate_guest_token(database, token)
             return TokenInspection(
-                session=session.model_copy(deep=True),
-                link=link.public(token),
+                session=self._session(session),
+                link=self._link(link, token),
                 activeCount=active_count,
             )
 
     def join_guest(self, token: str, display_name: str) -> GuestJoinResult:
-        with self.lock:
-            link, session, active_count = self._validate_guest_token(token)
+        with self._transaction() as database:
+            link, session, active_count = self._validate_guest_token(database, token)
             now = utcnow()
-            participant = Participant(
+            row = ParticipantRow(
                 id=_id("par"),
                 session_id=session.id,
                 user_id=None,
@@ -758,47 +899,57 @@ class InMemoryStore:
                 joined_at=now,
                 left_at=None,
                 connection="connected",
+                cursor=None,
             )
-            self.participants[participant.id] = participant
+            database.add(row)
+            database.flush()
             cookie_value = secrets.token_urlsafe(32)
-            self.guest_sessions[hash_credential(cookie_value)] = GuestSessionRecord(
-                token_hash=hash_credential(cookie_value),
-                participant_id=participant.id,
-                expires_at=now + GUEST_SESSION_TTL,
+            database.add(
+                GuestSessionRow(
+                    token_hash=hash_credential(cookie_value),
+                    participant_id=row.id,
+                    expires_at=now + GUEST_SESSION_TTL,
+                )
             )
-            self._record_audit(session.id, f"participant.joined:{display_name}", participant.id, now)
+            self._record_audit(
+                database, session.id, f"participant.joined:{display_name}", row.id, now
+            )
             return GuestJoinResult(
-                participant=participant.model_copy(deep=True),
-                session=session.model_copy(deep=True),
-                cookie_value=cookie_value,
+                self._participant(row), self._session(session), cookie_value
             )
 
     def resolve_guest_cookie(self, cookie_value: str) -> Participant | None:
-        with self.lock:
-            key = hash_credential(cookie_value)
-            record = self.guest_sessions.get(key)
-            if record is None:
+        with self._transaction() as database:
+            guest_session = database.get(GuestSessionRow, hash_credential(cookie_value))
+            if guest_session is None:
                 return None
-            if record.expires_at <= utcnow():
-                self.guest_sessions.pop(key, None)
+            if _aware(guest_session.expires_at) <= utcnow():  # type: ignore[operator]
+                database.delete(guest_session)
                 return None
-            participant = self.participants.get(record.participant_id)
+            participant = database.get(ParticipantRow, guest_session.participant_id)
             if participant is None or participant.left_at is not None:
                 return None
-            return participant.model_copy(deep=True)
+            return self._participant(participant)
 
-    def join_authenticated_participant(self, session_id: str, user_id: str) -> Participant:
-        with self.lock:
-            session = self.sessions.get(session_id)
+    def join_authenticated_participant(
+        self, session_id: str, user_id: str
+    ) -> Participant:
+        with self._transaction() as database:
+            session = database.get(InterviewSessionRow, session_id)
             if session is None:
                 raise not_found("session_not_found", "This interview does not exist.")
-            existing = self.active_participant_for_user(session_id, user_id)
+            existing = database.scalar(
+                self._active_participant_query(session_id, user_id)
+            )
             if existing:
-                return existing
+                return self._participant(existing)
             if session.owner_user_id != user_id:
-                raise forbidden("Only an interviewer assigned to this session can join it.")
-            user = self.users[user_id]
-            participant = Participant(
+                raise forbidden(
+                    "Only an interviewer assigned to this session can join it."
+                )
+            user = database.get(UserRow, user_id)
+            assert user is not None
+            row = ParticipantRow(
                 id=_id("par"),
                 session_id=session_id,
                 user_id=user_id,
@@ -808,46 +959,47 @@ class InMemoryStore:
                 joined_at=utcnow(),
                 left_at=None,
                 connection="connected",
+                cursor=None,
             )
-            self.participants[participant.id] = participant
-            self._record_audit(session_id, "participant.joined:owner", user_id)
-            return participant.model_copy(deep=True)
+            database.add(row)
+            self._record_audit(
+                database, session_id, "participant.joined:owner", user_id
+            )
+            database.flush()
+            return self._participant(row)
 
-    def get_participant(self, session_id: str, participant_id: str) -> Participant | None:
-        with self.lock:
-            participant = self.participants.get(participant_id)
-            if participant is None or participant.session_id != session_id:
-                return None
-            return participant.model_copy(deep=True)
+    def get_participant(
+        self, session_id: str, participant_id: str
+    ) -> Participant | None:
+        with self._transaction() as database:
+            row = database.get(ParticipantRow, participant_id)
+            return (
+                self._participant(row) if row and row.session_id == session_id else None
+            )
 
-    def active_participant_for_user(self, session_id: str, user_id: str) -> Participant | None:
-        return next(
-            (
-                participant.model_copy(deep=True)
-                for participant in self.participants.values()
-                if participant.session_id == session_id
-                and participant.user_id == user_id
-                and participant.left_at is None
-            ),
-            None,
-        )
+    def active_participant_for_user(
+        self, session_id: str, user_id: str
+    ) -> Participant | None:
+        with self._transaction() as database:
+            row = database.scalar(self._active_participant_query(session_id, user_id))
+            return self._participant(row) if row else None
 
     def user_can_access(self, session_id: str, user_id: str) -> bool:
-        session = self.sessions.get(session_id)
-        if session is None:
-            return False
-        if session.owner_user_id == user_id:
-            return True
-        return self.active_participant_for_user(session_id, user_id) is not None
+        with self._transaction() as database:
+            session = database.get(InterviewSessionRow, session_id)
+            return bool(session and self._can_access(database, session, user_id))
 
     def user_can_manage(self, session_id: str, user_id: str) -> bool:
-        session = self.sessions.get(session_id)
-        if session is None:
-            return False
-        if session.owner_user_id == user_id:
-            return True
-        participant = self.active_participant_for_user(session_id, user_id)
-        return participant is not None and participant.role == "interviewer"
+        with self._transaction() as database:
+            session = database.get(InterviewSessionRow, session_id)
+            if session is None:
+                return False
+            if session.owner_user_id == user_id:
+                return True
+            participant = database.scalar(
+                self._active_participant_query(session_id, user_id)
+            )
+            return bool(participant and participant.role == "interviewer")
 
     def principal_can_access(
         self,
@@ -856,11 +1008,12 @@ class InMemoryStore:
         user_id: str | None = None,
         participant_id: str | None = None,
     ) -> bool:
-        with self.lock:
+        with self._transaction() as database:
             if user_id is not None:
-                return self.user_can_access(session_id, user_id)
+                session = database.get(InterviewSessionRow, session_id)
+                return bool(session and self._can_access(database, session, user_id))
             if participant_id is not None:
-                participant = self.participants.get(participant_id)
+                participant = database.get(ParticipantRow, participant_id)
                 return bool(
                     participant
                     and participant.session_id == session_id
@@ -875,72 +1028,101 @@ class InMemoryStore:
         user_id: str | None = None,
         participant_id: str | None = None,
     ) -> bool:
-        with self.lock:
-            session = self.sessions.get(session_id)
+        with self._transaction() as database:
+            session = database.get(InterviewSessionRow, session_id)
             if session is None or session.state not in {"draft", "live"}:
                 return False
+            participant = None
             if user_id is not None:
                 if session.owner_user_id == user_id:
                     return True
-                participant = self.active_participant_for_user(session_id, user_id)
+                participant = database.scalar(
+                    self._active_participant_query(session_id, user_id)
+                )
             elif participant_id is not None:
-                participant = self.participants.get(participant_id)
+                participant = database.get(ParticipantRow, participant_id)
                 if participant and (
-                    participant.session_id != session_id or participant.left_at is not None
+                    participant.session_id != session_id
+                    or participant.left_at is not None
                 ):
                     participant = None
-            else:
-                return False
             if participant is None or participant.role == "observer":
                 return False
             return participant.role != "candidate" or session.candidate_editing_enabled
 
-    def leave_participant(self, session_id: str, participant_id: str, actor: str) -> bool | None:
-        with self.lock:
-            participant = self.participants.get(participant_id)
+    def leave_participant(
+        self, session_id: str, participant_id: str, actor: str
+    ) -> bool | None:
+        with self._transaction() as database:
+            participant = database.get(ParticipantRow, participant_id)
             if participant is None or participant.session_id != session_id:
                 return None
             if participant.left_at is None:
                 participant.left_at = utcnow()
                 participant.connection = "offline"
-                self._record_audit(session_id, "participant.left", actor)
+                self._record_audit(database, session_id, "participant.left", actor)
             return True
 
     def update_presence(
-        self,
-        session_id: str,
-        participant_id: str,
-        cursor: object,
+        self, session_id: str, participant_id: str, cursor: object
     ) -> Participant | None:
-        with self.lock:
-            participant = self.participants.get(participant_id)
-            if participant is None or participant.session_id != session_id or participant.left_at is not None:
+        with self._transaction() as database:
+            participant = database.get(ParticipantRow, participant_id)
+            if (
+                participant is None
+                or participant.session_id != session_id
+                or participant.left_at is not None
+            ):
                 return None
-            participant.cursor = cursor
+            participant.cursor = (
+                cursor.model_dump() if hasattr(cursor, "model_dump") else cursor
+            )  # type: ignore[union-attr,assignment]
             participant.connection = "connected"
-            return participant.model_copy(deep=True)
+            database.flush()
+            return self._participant(participant)
 
-    def save_canvas(self, session_id: str, elements: list[CanvasElement], actor: str) -> datetime | None:
-        with self.lock:
-            canvas = self.canvases.get(session_id)
-            session = self.sessions.get(session_id)
+    def save_canvas(
+        self, session_id: str, elements: list[CanvasElement], actor: str
+    ) -> datetime | None:
+        with self._transaction() as database:
+            canvas = database.scalar(
+                select(CanvasRow).where(CanvasRow.session_id == session_id)
+            )
+            session = database.get(InterviewSessionRow, session_id)
             if canvas is None or session is None:
                 return None
             now = utcnow()
-            canvas.elements = [element for element in elements]
+            canvas.elements = [
+                element.model_dump(mode="json", by_alias=True)
+                if hasattr(element, "model_dump")
+                else element
+                for element in elements
+            ]  # type: ignore[union-attr,misc]
             canvas.updated_at = now
-            self.sessions[session_id] = session.model_copy(update={"updated_at": now})
-            self._record_audit(session_id, "canvas.saved", actor, now)
+            session.updated_at = now
+            self._record_audit(database, session_id, "canvas.saved", actor, now)
             return now
 
     def list_audit(self, session_id: str) -> list[AuditEvent]:
-        with self.lock:
-            events = [event.model_copy(deep=True) for event in self.audit_events if event.session_id == session_id]
-            events.sort(key=lambda event: event.at, reverse=True)
-            return events
+        with self._transaction() as database:
+            rows = database.scalars(
+                select(AuditEventRow)
+                .where(AuditEventRow.session_id == session_id)
+                .order_by(AuditEventRow.at.desc())
+            ).all()
+            return [
+                AuditEvent(
+                    id=row.id,
+                    session_id=row.session_id,
+                    event=row.event,
+                    at=_aware(row.at),
+                    actor=row.actor,
+                )
+                for row in rows
+            ]  # type: ignore[arg-type]
 
 
-def get_store(connection: HTTPConnection) -> InMemoryStore:
-    """Resolve the store from the ASGI application for HTTP and WebSocket calls."""
+def get_store(connection: HTTPConnection) -> DatabaseStore:
+    """Resolve the repository from the ASGI application."""
 
     return connection.app.state.store

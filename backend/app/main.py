@@ -15,7 +15,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from .errors import ApiException
 from .models import ApiError
 from .routers import auth, canvas, guest, me, participants, realtime, review, sessions
-from .store import InMemoryStore
+from .store import DatabaseStore
 
 
 def _validation_message(exc: RequestValidationError) -> str:
@@ -27,7 +27,7 @@ def _validation_message(exc: RequestValidationError) -> str:
     return f"{location}: {message}" if location else message
 
 
-def create_app(store: InMemoryStore | None = None) -> FastAPI:
+def create_app(store: DatabaseStore | None = None) -> FastAPI:
     application = FastAPI(
         title="System Design Interview Platform API",
         version="1.0.0",
@@ -36,7 +36,7 @@ def create_app(store: InMemoryStore | None = None) -> FastAPI:
             "Guest access is established by the sdip_guest_session cookie."
         ),
     )
-    application.state.store = store or InMemoryStore.seeded()
+    application.state.store = store or DatabaseStore.seeded(url=None)
 
     origins = [
         origin.strip()

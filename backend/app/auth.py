@@ -14,7 +14,7 @@ from pwdlib import PasswordHash
 
 from .errors import invalid_token, unauthorized
 from .models import Participant, User
-from .store import GUEST_COOKIE_NAME, InMemoryStore, get_store
+from .store import DatabaseStore, GUEST_COOKIE_NAME, get_store
 
 JWT_ALGORITHM = "HS256"
 JWT_SECRET = os.getenv("SDIP_JWT_SECRET", "local-development-secret-change-me")
@@ -78,7 +78,7 @@ def decode_access_token(token: str) -> str:
     return user_id
 
 
-def authenticate_bearer(token: str, store: InMemoryStore) -> Principal:
+def authenticate_bearer(token: str, store: DatabaseStore) -> Principal:
     user_id = decode_access_token(token)
     user_record = store.get_user(user_id)
     if user_record is None:
@@ -86,7 +86,7 @@ def authenticate_bearer(token: str, store: InMemoryStore) -> Principal:
     return Principal(kind="user", user=user_record.public())
 
 
-def authenticate_user(email: str, password: str, store: InMemoryStore) -> User | None:
+def authenticate_user(email: str, password: str, store: DatabaseStore) -> User | None:
     user_record = store.find_user_by_email(email)
     if user_record is None or not verify_password(password, user_record.password_hash):
         return None
@@ -95,7 +95,7 @@ def authenticate_user(email: str, password: str, store: InMemoryStore) -> User |
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
-    store: InMemoryStore = Depends(get_store),
+    store: DatabaseStore = Depends(get_store),
 ) -> User:
     if credentials is None:
         raise unauthorized()
@@ -107,7 +107,7 @@ def get_current_user(
 def get_principal(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     guest_cookie: str | None = Depends(guest_cookie_scheme),
-    store: InMemoryStore = Depends(get_store),
+    store: DatabaseStore = Depends(get_store),
 ) -> Principal:
     # A supplied bearer token takes precedence over a cookie. This avoids
     # silently downgrading an invalid bearer credential to guest access.
@@ -124,7 +124,7 @@ def get_principal(
 def authenticate_websocket(
     authorization: str | None,
     guest_cookie: str | None,
-    store: InMemoryStore,
+    store: DatabaseStore,
 ) -> Principal:
     if authorization:
         scheme, _, token = authorization.partition(" ")

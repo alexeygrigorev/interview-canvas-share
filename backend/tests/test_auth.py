@@ -35,7 +35,7 @@ def test_login_verifies_hashed_password_and_returns_bearer_token(
     client: TestClient,
     store,
 ) -> None:
-    user_record = store.users["usr_avery"]
+    user_record = store.get_user("usr_avery")
     assert isinstance(user_record, UserRecord)
     assert user_record.password_hash.startswith("$argon2")
     assert "demo-password" not in user_record.password_hash

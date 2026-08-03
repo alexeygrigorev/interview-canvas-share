@@ -1,19 +1,24 @@
+import os
 from collections.abc import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
 
+# Importing the ASGI module constructs its production-style module-level app.
+# Keep that app isolated from the filesystem; individual tests use temporary files.
+os.environ.setdefault("SDIP_DATABASE_URL", "sqlite://")
+
 from backend.app.main import create_app
-from backend.app.store import InMemoryStore
+from backend.app.store import DatabaseStore
 
 
 @pytest.fixture
-def store() -> InMemoryStore:
-    return InMemoryStore.seeded()
+def store(tmp_path) -> DatabaseStore:
+    return DatabaseStore.seeded(f"sqlite:///{tmp_path / 'test.db'}")
 
 
 @pytest.fixture
-def client(store: InMemoryStore) -> Iterator[TestClient]:
+def client(store: DatabaseStore) -> Iterator[TestClient]:
     with TestClient(create_app(store)) as test_client:
         yield test_client
 

@@ -84,8 +84,9 @@ def test_guest_link_is_hashed_and_revocation_returns_gone(client: TestClient, st
     assert created.status_code == 201
     raw_token = created.json()["token"]
     link_id = created.json()["id"]
-    link_record = store.links[link_id]
-    assert raw_token not in link_record.token_hash
+    token_hash = store.get_guest_link_hash(link_id)
+    assert token_hash is not None
+    assert raw_token not in token_hash
 
     assert client.delete(
         f"/v1/sessions/ses_url_shortener/guest-links/{link_id}",

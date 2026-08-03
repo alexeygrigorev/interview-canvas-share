@@ -17,7 +17,7 @@ from ..models import (
     RoomMessage,
     SessionEndedMessage,
 )
-from ..store import InMemoryStore, get_store
+from ..store import DatabaseStore, get_store
 
 router = APIRouter(tags=["Realtime"])
 room_message_adapter = TypeAdapter(RoomMessage)
@@ -75,7 +75,7 @@ async def _send_validation_error(websocket: WebSocket, message: str) -> None:
 
 
 @router.websocket("/v1/sessions/{id}/realtime")
-async def realtime(id: str, websocket: WebSocket, store: InMemoryStore = Depends(get_store)) -> None:
+async def realtime(id: str, websocket: WebSocket, store: DatabaseStore = Depends(get_store)) -> None:
     try:
         protocols = [
             protocol.strip()

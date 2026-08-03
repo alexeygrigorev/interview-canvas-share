@@ -7,14 +7,14 @@ from fastapi import Depends
 from ..auth import Principal, get_current_user, get_principal
 from ..errors import forbidden, not_found
 from ..models import InterviewSession, User
-from ..store import InMemoryStore, get_store
+from ..store import DatabaseStore, get_store
 
 
 def require_session_for_principal(
     id: str,
     principal: Principal = Depends(get_principal),
-    store: InMemoryStore = Depends(get_store),
-) -> tuple[InterviewSession, Principal, InMemoryStore]:
+    store: DatabaseStore = Depends(get_store),
+) -> tuple[InterviewSession, Principal, DatabaseStore]:
     session = store.get_session(id)
     if session is None:
         raise not_found("session_not_found", "This interview does not exist.")
@@ -30,8 +30,8 @@ def require_session_for_principal(
 def require_session_manager(
     id: str,
     current_user: User = Depends(get_current_user),
-    store: InMemoryStore = Depends(get_store),
-) -> tuple[InterviewSession, User, InMemoryStore]:
+    store: DatabaseStore = Depends(get_store),
+) -> tuple[InterviewSession, User, DatabaseStore]:
     session = store.get_session(id)
     if session is None:
         raise not_found("session_not_found", "This interview does not exist.")

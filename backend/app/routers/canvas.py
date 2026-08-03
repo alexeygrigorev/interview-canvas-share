@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends
 from ..auth import Principal
 from ..errors import forbidden, not_found
 from ..models import CanvasDocument, DocumentUpdateMessage, SaveCanvasRequest
-from ..store import InMemoryStore
+from ..store import DatabaseStore
 from .dependencies import require_session_for_principal
 from .realtime import broadcast_message
 
@@ -16,7 +16,7 @@ router = APIRouter(prefix="/v1/sessions", tags=["Canvas"])
 
 @router.get("/{id}/canvas", response_model=CanvasDocument, operation_id="getCanvas")
 def get_canvas(
-    context: tuple[object, Principal, InMemoryStore] = Depends(require_session_for_principal),
+    context: tuple[object, Principal, DatabaseStore] = Depends(require_session_for_principal),
 ) -> CanvasDocument:
     session, _, store = context
     canvas = store.get_canvas(session.id)
@@ -28,7 +28,7 @@ def get_canvas(
 @router.put("/{id}/canvas", response_model=datetime, operation_id="saveCanvas")
 async def save_canvas(
     payload: SaveCanvasRequest,
-    context: tuple[object, Principal, InMemoryStore] = Depends(require_session_for_principal),
+    context: tuple[object, Principal, DatabaseStore] = Depends(require_session_for_principal),
 ) -> datetime:
     session, principal, store = context
     if not store.principal_can_edit(
