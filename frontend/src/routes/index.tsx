@@ -1,7 +1,7 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { api } from "@/lib/api/mock-api";
+import { api } from "@/lib/api/api";
 import { StateBadge } from "@/components/Presence";
 import { Button } from "@/components/ui/button";
 import {
@@ -10,16 +10,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Plus,
-  Link2,
-  Copy,
-  Archive,
-  MoreHorizontal,
-  PanelsTopLeft,
-  Radio,
-  RotateCcw,
-} from "lucide-react";
+import { Plus, Link2, Copy, Archive, MoreHorizontal, PanelsTopLeft, Radio } from "lucide-react";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -66,7 +57,7 @@ function Dashboard() {
           <PanelsTopLeft className="text-primary" size={20} />
           <span className="text-sm font-semibold tracking-tight">Sketchboard Interviews</span>
           <span className="rounded border border-border px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-            MVP v1.0 · mocked API
+            MVP v1.0 · live API
           </span>
           <div className="ml-auto flex items-center gap-3">
             <span className="text-xs text-muted-foreground">{user?.email}</span>
@@ -86,17 +77,6 @@ function Dashboard() {
             </p>
           </div>
           <div className="flex gap-2">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                api.resetMockData();
-                refresh();
-                toast.success("Mock data reset");
-              }}
-            >
-              <RotateCcw size={14} /> Reset mock data
-            </Button>
             <Button onClick={() => navigate({ to: "/interviews/new" })}>
               <Plus size={16} /> New interview
             </Button>

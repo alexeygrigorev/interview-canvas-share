@@ -30,7 +30,7 @@ export interface InterviewSession {
 export interface GuestLink {
   id: string;
   session_id: string;
-  token: string; // mock only — real backend stores token_hash
+  token: string; // plaintext is returned only when needed to construct an invitation URL
   role_granted: Exclude<Role, "owner">;
   expires_at: string | null;
   max_uses: number | null;

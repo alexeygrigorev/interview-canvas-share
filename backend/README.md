@@ -7,7 +7,7 @@ make sync
 make run
 ```
 
-The server listens on `http://127.0.0.1:8000` by default. Override it with,
+The server listens on `http://127.0.0.1:8091` by default. Override it with,
 for example, `make run HOST=0.0.0.0 PORT=8080`.
 
 The seeded users all use `demo-password`. The login endpoint is

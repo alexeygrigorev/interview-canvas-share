@@ -7,8 +7,7 @@ info:
     identifier: LicenseRef-Proprietary
   description: |
     HTTP contract consumed by the frontend API client in
-    `frontend/src/lib/api/mock-api.ts`. The mock client is local-only, but its
-    documented paths are the paths the production backend must expose.
+    `frontend/src/lib/api/api.ts`.
 
     Guest access is established by the link token. `POST /v1/join/{token}` may
     set the short-lived `sdip_guest_session` cookie used by a guest for the

@@ -27,8 +27,8 @@ class ConnectionManager:
     def __init__(self) -> None:
         self.connections: dict[str, set[WebSocket]] = defaultdict(set)
 
-    async def connect(self, session_id: str, websocket: WebSocket) -> None:
-        await websocket.accept()
+    async def connect(self, session_id: str, websocket: WebSocket, subprotocol: str | None = None) -> None:
+        await websocket.accept(subprotocol=subprotocol)
         self.connections[session_id].add(websocket)
 
     def disconnect(self, session_id: str, websocket: WebSocket) -> None:
@@ -77,8 +77,21 @@ async def _send_validation_error(websocket: WebSocket, message: str) -> None:
 @router.websocket("/v1/sessions/{id}/realtime")
 async def realtime(id: str, websocket: WebSocket, store: InMemoryStore = Depends(get_store)) -> None:
     try:
+        protocols = [
+            protocol.strip()
+            for protocol in websocket.headers.get("sec-websocket-protocol", "").split(",")
+            if protocol.strip()
+        ]
+        authorization = websocket.headers.get("authorization")
+        if authorization is None:
+            bearer_protocol = next(
+                (protocol for protocol in protocols if protocol.startswith("bearer.")),
+                None,
+            )
+            if bearer_protocol is not None:
+                authorization = f"Bearer {bearer_protocol.removeprefix('bearer.')}"
         principal = authenticate_websocket(
-            websocket.headers.get("authorization"),
+            authorization,
             websocket.cookies.get("sdip_guest_session"),
             store,
         )
@@ -95,7 +108,7 @@ async def realtime(id: str, websocket: WebSocket, store: InMemoryStore = Depends
         await websocket.close(code=_websocket_error_code(error), reason=error.message)
         return
 
-    await manager.connect(id, websocket)
+    await manager.connect(id, websocket, "sdip" if "sdip" in protocols else None)
     try:
         while True:
             payload = await websocket.receive_json()

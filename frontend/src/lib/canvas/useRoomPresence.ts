@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Participant } from "@/lib/api/types";
-import { publish, subscribe } from "@/lib/api/mock-api";
+import { publish, subscribe } from "@/lib/api/api";
 
-/** Mock of the presence channel: ephemeral, not persisted. */
+/** Ephemeral room presence synchronized through the realtime gateway. */
 export function useRoomPresence(sessionId: string, me: Participant | null) {
   const [peers, setPeers] = useState<Record<string, Participant>>({});
   const last = useRef(0);

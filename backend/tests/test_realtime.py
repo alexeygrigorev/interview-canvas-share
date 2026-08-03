@@ -27,6 +27,15 @@ def test_realtime_document_message_is_broadcast_and_persisted(client: TestClient
     assert canvas.json()["elements"] == []
 
 
+def test_realtime_accepts_browser_bearer_subprotocol(client: TestClient) -> None:
+    token = login(client)
+    with client.websocket_connect(
+        "/v1/sessions/ses_url_shortener/realtime",
+        subprotocols=["sdip", f"bearer.{token}"],
+    ) as websocket:
+        assert websocket.accepted_subprotocol == "sdip"
+
+
 def test_realtime_rejects_server_generated_client_messages(client: TestClient) -> None:
     token = login(client)
     with client.websocket_connect(

@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "@/lib/api/mock-api";
+import { api } from "@/lib/api/api";
 import { StateBadge } from "@/components/Presence";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, Download } from "lucide-react";

@@ -2,7 +2,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { api, subscribe } from "@/lib/api/mock-api";
+import { api, subscribe } from "@/lib/api/api";
 import type { CanvasElement, InterviewSession, Participant } from "@/lib/api/types";
 import { useCanvasDoc } from "@/lib/canvas/useCanvasDoc";
 import { useRoomPresence } from "@/lib/canvas/useRoomPresence";

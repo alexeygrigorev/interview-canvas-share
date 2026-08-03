@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CanvasElement } from "@/lib/api/types";
-import { api, subscribe } from "@/lib/api/mock-api";
+import { api, subscribe } from "@/lib/api/api";
 
 export type SaveState = "saved" | "saving" | "pending" | "error";
 
 /**
  * Local collaboration document. Optimistic local edits + debounced autosave
- * through the mock API, plus fan-out of remote updates. Swap the api calls for
- * a CRDT/WebSocket client later without touching the canvas UI.
+ * through the backend API, plus WebSocket fan-out of remote updates.
  */
 export function useCanvasDoc(sessionId: string, actorId: string, canEdit: boolean) {
   const [elements, setElements] = useState<CanvasElement[]>([]);
