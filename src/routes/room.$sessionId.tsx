@@ -491,7 +491,7 @@ function OwnerMenu({
         )}
         <DropdownMenuSeparator />
         <DropdownMenuItem
-          variant="destructive"
+          className="text-destructive focus:text-destructive"
           onSelect={() => {
             onClear();
             toast.success("Canvas cleared", { description: "Undo restores the previous state." });
