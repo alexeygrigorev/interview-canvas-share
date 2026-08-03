@@ -10,6 +10,7 @@ import {
   newStroke,
   nodeCenter,
   strokePath,
+  offsetCopy,
   useElementMap,
   useViewport,
   type Tool,

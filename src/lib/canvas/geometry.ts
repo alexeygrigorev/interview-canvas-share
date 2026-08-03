@@ -269,3 +269,13 @@ export function newConnector(from: string, to: string, actor: string): Connector
 }
 
 export { uid, clamp, GRID };
+
+/** Duplicate an element offset by `d`; connectors are not copyable standalone. */
+export function offsetCopy(el: CanvasElement, d: number): CanvasElement | null {
+  const id = uid("el");
+  if (el.kind === "connector") return null;
+  if (el.kind === "stroke") {
+    return { ...el, id, points: el.points.map((p) => p + d) };
+  }
+  return { ...el, id, x: el.x + d, y: el.y + d };
+}
