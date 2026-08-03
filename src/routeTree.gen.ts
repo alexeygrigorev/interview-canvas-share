@@ -10,33 +10,89 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as InterviewsNewRouteImport } from './routes/interviews.new'
+import { Route as JoinTokenRouteImport } from './routes/join.$token'
+import { Route as ReviewSessionIdRouteImport } from './routes/review.$sessionId'
+import { Route as RoomSessionIdRouteImport } from './routes/room.$sessionId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const InterviewsNewRoute = InterviewsNewRouteImport.update({
+  id: '/interviews/new',
+  path: '/interviews/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const JoinTokenRoute = JoinTokenRouteImport.update({
+  id: '/join/$token',
+  path: '/join/$token',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ReviewSessionIdRoute = ReviewSessionIdRouteImport.update({
+  id: '/review/$sessionId',
+  path: '/review/$sessionId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RoomSessionIdRoute = RoomSessionIdRouteImport.update({
+  id: '/room/$sessionId',
+  path: '/room/$sessionId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/interviews/new': typeof InterviewsNewRoute
+  '/join/$token': typeof JoinTokenRoute
+  '/review/$sessionId': typeof ReviewSessionIdRoute
+  '/room/$sessionId': typeof RoomSessionIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/interviews/new': typeof InterviewsNewRoute
+  '/join/$token': typeof JoinTokenRoute
+  '/review/$sessionId': typeof ReviewSessionIdRoute
+  '/room/$sessionId': typeof RoomSessionIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/interviews/new': typeof InterviewsNewRoute
+  '/join/$token': typeof JoinTokenRoute
+  '/review/$sessionId': typeof ReviewSessionIdRoute
+  '/room/$sessionId': typeof RoomSessionIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths:
+    | '/'
+    | '/interviews/new'
+    | '/join/$token'
+    | '/review/$sessionId'
+    | '/room/$sessionId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to:
+    | '/'
+    | '/interviews/new'
+    | '/join/$token'
+    | '/review/$sessionId'
+    | '/room/$sessionId'
+  id:
+    | '__root__'
+    | '/'
+    | '/interviews/new'
+    | '/join/$token'
+    | '/review/$sessionId'
+    | '/room/$sessionId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  InterviewsNewRoute: typeof InterviewsNewRoute
+  JoinTokenRoute: typeof JoinTokenRoute
+  ReviewSessionIdRoute: typeof ReviewSessionIdRoute
+  RoomSessionIdRoute: typeof RoomSessionIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -48,22 +104,44 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/interviews/new': {
+      id: '/interviews/new'
+      path: '/interviews/new'
+      fullPath: '/interviews/new'
+      preLoaderRoute: typeof InterviewsNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/join/$token': {
+      id: '/join/$token'
+      path: '/join/$token'
+      fullPath: '/join/$token'
+      preLoaderRoute: typeof JoinTokenRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/review/$sessionId': {
+      id: '/review/$sessionId'
+      path: '/review/$sessionId'
+      fullPath: '/review/$sessionId'
+      preLoaderRoute: typeof ReviewSessionIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/room/$sessionId': {
+      id: '/room/$sessionId'
+      path: '/room/$sessionId'
+      fullPath: '/room/$sessionId'
+      preLoaderRoute: typeof RoomSessionIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  InterviewsNewRoute: InterviewsNewRoute,
+  JoinTokenRoute: JoinTokenRoute,
+  ReviewSessionIdRoute: ReviewSessionIdRoute,
+  RoomSessionIdRoute: RoomSessionIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
-
-import type { getRouter } from './router.tsx'
-import type { startInstance } from './start.ts'
-declare module '@tanstack/react-start' {
-  interface Register {
-    ssr: true
-    router: Awaited<ReturnType<typeof getRouter>>
-    config: Awaited<ReturnType<typeof startInstance.getOptions>>
-  }
-}
