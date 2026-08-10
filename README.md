@@ -8,8 +8,8 @@ labels and notes, and drawing freehand. Edits are broadcast over WebSockets so
 every participant sees updates immediately, and the final canvas is preserved
 for later review.
 
-- **Backend** — FastAPI (Python 3.12), SQLAlchemy over SQLite, JWT auth,
-  WebSocket realtime updates. Lives in `backend/`.
+- **Backend** — FastAPI (Python 3.12), SQLAlchemy over SQLite or PostgreSQL,
+  JWT auth, WebSocket realtime updates. Lives in `backend/`.
 - **Frontend** — TanStack Start / React + Vite. Lives in `frontend/`.
 - **Spec** — `docs/spec.md`. **API contract** — `openapi.yaml`.
 
@@ -74,17 +74,67 @@ The seeded demo users (`avery@northwind.dev`, `jordan@northwind.dev`,
 `priya@northwind.dev`) all use the password `demo-password`; log in through the
 UI or with `POST /v1/auth/login`.
 
+### Run against PostgreSQL
+
+SQLite is the zero-setup default; PostgreSQL is supported for anything with more
+than one writer or a need to keep data outside the app. Start a database:
+
+```sh
+docker run -d \
+  --name interview-canvas-db \
+  -e POSTGRES_USER=sdip \
+  -e POSTGRES_PASSWORD=sdip \
+  -e POSTGRES_DB=sdip \
+  -p 5432:5432 \
+  -v interview-canvas-pgdata:/var/lib/postgresql/data \
+  postgres:16-alpine
+```
+
+The app creates its tables and seeds the demo data on first start, so there is
+no migration step. Put both containers on the same Docker network so the app can
+reach the database by container name:
+
+```sh
+docker network create sdip-net
+docker network connect sdip-net interview-canvas-db
+
+docker run --rm -p 8000:8000 \
+  --network sdip-net \
+  -e SDIP_DATABASE_URL=postgresql://sdip:sdip@interview-canvas-db:5432/sdip \
+  --name sdip sdip:latest
+```
+
+No `-v` is needed here — the data now lives in the database container's
+`interview-canvas-pgdata` volume. Running outside Docker, point at the published
+port instead:
+
+```sh
+SDIP_DATABASE_URL=postgresql://sdip:sdip@localhost:5432/sdip make run
+```
+
+`postgres://` and `postgresql://` URLs are both accepted and routed to the
+installed psycopg 3 driver, so a URL copied from a hosted provider works as is.
+To wipe the database and start over from the seed data:
+
+```sh
+docker rm -f interview-canvas-db
+docker volume rm interview-canvas-pgdata
+```
+
 ### Configuration
 
 All settings are environment variables passed with `-e`:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SDIP_DATABASE_URL` | `sqlite:///./sdip.db` | Any SQLAlchemy database URL |
+| `SDIP_DATABASE_URL` | `sqlite:///./sdip.db` | Any SQLAlchemy database URL — SQLite or PostgreSQL |
 | `SDIP_JWT_SECRET` | `local-development-secret-change-me` | JWT signing secret — **set this outside local development** |
 | `SDIP_ACCESS_TOKEN_MINUTES` | `60` | Access token lifetime |
 | `SDIP_CORS_ORIGINS` | localhost dev origins | Comma-separated allowed origins |
 | `SDIP_STATIC_DIR` | `app/static` | Directory the frontend bundle is served from |
+| `SDIP_DB_POOL_SIZE` | `5` | PostgreSQL connection pool size (ignored on SQLite) |
+| `SDIP_DB_MAX_OVERFLOW` | `10` | Extra PostgreSQL connections allowed under burst |
+| `SDIP_DB_POOL_RECYCLE` | `1800` | Seconds before a pooled connection is reopened |
 
 Set `SDIP_JWT_SECRET` to a real secret before running this anywhere but your
 own machine:

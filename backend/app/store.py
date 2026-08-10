@@ -18,7 +18,6 @@ from starlette.requests import HTTPConnection
 
 from .database import (
     AuditEventRow,
-    Base,
     CanvasRow,
     GuestLinkRow,
     GuestSessionRow,
@@ -27,6 +26,8 @@ from .database import (
     UserRow,
     create_database_engine,
     create_session_factory,
+    initialize_schema,
+    lock_schema,
 )
 from .errors import conflict, forbidden, gone, not_found
 from .models import (
@@ -110,7 +111,7 @@ class DatabaseStore:
     def __init__(self, engine: Engine):
         self.engine = engine
         self.session_factory: sessionmaker[Session] = create_session_factory(engine)
-        Base.metadata.create_all(engine)
+        initialize_schema(engine)
 
     @classmethod
     def from_url(cls, url: str | None = None) -> DatabaseStore:
@@ -138,6 +139,7 @@ class DatabaseStore:
         """Seed an empty database, leaving existing databases untouched."""
 
         with self._transaction() as database:
+            lock_schema(database)
             if database.scalar(select(func.count()).select_from(UserRow)):
                 return
             password_hash = PasswordHash.recommended()
@@ -169,6 +171,10 @@ class DatabaseStore:
                 ),
             ]
             database.add_all(users)
+            # No ORM relationships are mapped, so the unit of work cannot infer
+            # that sessions and participants depend on these rows; flush each
+            # level explicitly to satisfy the foreign keys PostgreSQL enforces.
+            database.flush()
             live_created = now - timedelta(hours=2)
             live_started = now - timedelta(hours=1, minutes=45)
             live_updated = now - timedelta(minutes=3)

@@ -15,13 +15,23 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 DATABASE_URL_ENV = "SDIP_DATABASE_URL"
 DEFAULT_DATABASE_URL = "sqlite:///./sdip.db"
+
+# PostgreSQL stores JSON documents more efficiently — and indexably — as JSONB,
+# while every other backend keeps the portable JSON type.
+JSONDocument = JSON().with_variant(JSONB(), "postgresql")
+
+# Arbitrary but stable key for the advisory lock that serializes schema creation
+# and seeding across concurrent PostgreSQL workers.
+SCHEMA_LOCK_KEY = 0x5D19_C0DE
 
 
 class Base(DeclarativeBase):
@@ -73,7 +83,7 @@ class ParticipantRow(Base):
         DateTime(timezone=True), index=True
     )
     connection: Mapped[str] = mapped_column(String(20))
-    cursor: Mapped[dict[str, float] | None] = mapped_column(JSON)
+    cursor: Mapped[dict[str, float] | None] = mapped_column(JSONDocument)
 
 
 class GuestLinkRow(Base):
@@ -109,7 +119,7 @@ class CanvasRow(Base):
         ForeignKey("interview_sessions.id"), unique=True, index=True
     )
     schema_version: Mapped[int] = mapped_column(Integer)
-    elements: Mapped[list[dict[str, object]]] = mapped_column(JSON)
+    elements: Mapped[list[dict[str, object]]] = mapped_column(JSONDocument)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -131,10 +141,32 @@ def database_url() -> str:
     return os.getenv(DATABASE_URL_ENV, DEFAULT_DATABASE_URL)
 
 
+def normalize_database_url(url: str) -> str:
+    """Point PostgreSQL URLs at psycopg 3, the driver this project installs.
+
+    Hosted databases hand out ``postgres://`` and ``postgresql://`` URLs, both of
+    which SQLAlchemy would otherwise resolve to the unavailable psycopg2 driver.
+    """
+
+    scheme, separator, rest = url.partition("://")
+    if not separator:
+        return url
+    if scheme in {"postgres", "postgresql"}:
+        return f"postgresql+psycopg://{rest}"
+    return url
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return int(raw)
+
+
 def create_database_engine(url: str | None = None) -> Engine:
     """Create an engine without coupling the application to a specific backend."""
 
-    resolved_url = url or database_url()
+    resolved_url = normalize_database_url(url or database_url())
     options: dict[str, object] = {"pool_pre_ping": True}
     if resolved_url.startswith("sqlite"):
         options["connect_args"] = {"check_same_thread": False}
@@ -144,8 +176,46 @@ def create_database_engine(url: str | None = None) -> Engine:
             database_path = Path(resolved_url.removeprefix("sqlite:///"))
             if str(database_path) != ":memory:":
                 database_path.parent.mkdir(parents=True, exist_ok=True)
+    elif resolved_url.startswith("postgresql"):
+        # WebSocket rooms hold a connection only for the duration of each write,
+        # but a busy room still bursts; size the pool from the environment and
+        # recycle before typical proxy/server idle timeouts drop connections.
+        options["pool_size"] = _int_env("SDIP_DB_POOL_SIZE", 5)
+        options["max_overflow"] = _int_env("SDIP_DB_MAX_OVERFLOW", 10)
+        options["pool_recycle"] = _int_env("SDIP_DB_POOL_RECYCLE", 1800)
     return create_engine(resolved_url, **options)
 
 
 def create_session_factory(engine: Engine) -> sessionmaker[Session]:
     return sessionmaker(bind=engine, expire_on_commit=False)
+
+
+def is_postgresql(engine: Engine) -> bool:
+    return engine.dialect.name == "postgresql"
+
+
+def lock_schema(database: Session) -> None:
+    """Serialize schema creation and seeding for the enclosing transaction.
+
+    Concurrent PostgreSQL workers otherwise race: both read an empty database and
+    both try to insert the seed rows. The lock is released when the transaction
+    ends; on other backends this is a no-op.
+    """
+
+    if is_postgresql(database.get_bind()):  # type: ignore[arg-type]
+        database.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"), {"key": SCHEMA_LOCK_KEY}
+        )
+
+
+def initialize_schema(engine: Engine) -> None:
+    """Create any missing tables, tolerating concurrent workers."""
+
+    if not is_postgresql(engine):
+        Base.metadata.create_all(engine)
+        return
+    with engine.begin() as connection:
+        connection.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"), {"key": SCHEMA_LOCK_KEY}
+        )
+        Base.metadata.create_all(connection)
