@@ -74,6 +74,36 @@ The seeded demo users (`avery@northwind.dev`, `jordan@northwind.dev`,
 `priya@northwind.dev`) all use the password `demo-password`; log in through the
 UI or with `POST /v1/auth/login`.
 
+### Run with Docker Compose
+
+`docker-compose.yaml` wires the app to a PostgreSQL container so both start with
+one command — the app waits for the database healthcheck before booting, then
+creates its tables and seeds the demo data:
+
+```sh
+docker compose up --build
+```
+
+Open <http://localhost:8000>. Stop with `docker compose down`; add `-v` to wipe
+the database and reseed on the next start.
+
+The database is not published to the host — the app reaches it over the compose
+network. Uncomment the `ports` block under `postgres` to connect with `psql`
+from your machine.
+
+Every value has a working default, so no `.env` file is required. Override any
+of them in the environment or an `.env` file next to the compose file:
+
+| Variable | Default |
+| --- | --- |
+| `APP_PORT` | `8000` — host port the UI and API are published on |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `sdip` |
+| `SDIP_JWT_SECRET` | the local development secret — **set this outside local development** |
+
+```sh
+APP_PORT=8100 SDIP_JWT_SECRET=some-long-random-string docker compose up --build
+```
+
 ### Run against PostgreSQL
 
 SQLite is the zero-setup default; PostgreSQL is supported for anything with more

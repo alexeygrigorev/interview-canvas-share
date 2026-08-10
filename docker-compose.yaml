@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sdip}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sdip}
+      POSTGRES_DB: ${POSTGRES_DB:-sdip}
+    # Not published to the host: the app reaches it over the compose network.
+    # Uncomment to inspect the database with psql from your machine.
+    # ports:
+    #   - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The app creates its tables on startup, so it must not start before the
+      # database accepts connections.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sdip} -d ${POSTGRES_DB:-sdip}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  app:
+    build: .
+    environment:
+      SDIP_DATABASE_URL: postgresql://${POSTGRES_USER:-sdip}:${POSTGRES_PASSWORD:-sdip}@postgres:5432/${POSTGRES_DB:-sdip}
+      SDIP_JWT_SECRET: ${SDIP_JWT_SECRET:-local-development-secret-change-me}
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
