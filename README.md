@@ -12,6 +12,7 @@ for later review.
   JWT auth, WebSocket realtime updates. Lives in `backend/`.
 - **Frontend** — TanStack Start / React + Vite. Lives in `frontend/`.
 - **Spec** — `docs/spec.md`. **API contract** — `openapi.yaml`.
+- **End-to-end tests** — Playwright against the compose stack. Lives in `e2e/`.
 
 ## Run with Docker
 
@@ -208,3 +209,18 @@ npm run dev
 ```
 
 See `backend/README.md` for more backend detail.
+
+## End-to-end tests
+
+`e2e/` holds Playwright tests that drive the compose deployment through a real
+browser: the interviewer logs in, creates a session, shares the join link, a
+second client joins as the candidate and edits the canvas, and the interviewer's
+screen is checked for that edit.
+
+```sh
+make e2e
+```
+
+Playwright brings the stack up with `docker compose up --build` and stops it
+afterwards, reusing a deployment that is already running on the app port. See
+`e2e/README.md` for configuration and how to run it headed or in the debugger.
