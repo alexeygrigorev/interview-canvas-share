@@ -226,6 +226,13 @@ aws cloudformation deploy \
       RepoUrl=https://github.com/you/ai-system-desing-canva.git
 ```
 
+Nothing in the template is region-specific — the subnet takes the first
+availability zone of whatever region you deploy into, and the AMI resolves from
+an SSM public parameter that exists everywhere — so the region comes from your
+CLI configuration, or from an explicit `--region`. Choose the one closest to the
+people interviewing: every canvas edit round-trips through this single instance,
+so its distance from participants is felt directly as lag.
+
 `CAPABILITY_IAM` is required because the stack creates an instance role granting
 Session Manager access — that is what lets you get a shell without opening port
 22 or managing a key pair. Add `KeyName` and `SshCidr` parameters only if you
@@ -288,9 +295,10 @@ database to RDS by pointing `SDIP_DATABASE_URL` at it and dropping the
 
 ### What it costs
 
-Roughly $17/month in `us-east-1`: about $12 for the `t4g.small` instance, $1.60
-for 20 GiB of gp3, and $3.65 for the public IPv4 address. Data transfer for a
-handful of concurrent interviews is negligible.
+About $19/month in `eu-west-1` at list price: $13.43 for the `t4g.small`
+instance, $1.76 for 20 GiB of gp3, and $3.65 for the public IPv4 address. Data
+transfer for a handful of concurrent interviews is negligible. Instance and
+storage rates vary by region; the IPv4 charge does not.
 
 ### Scaling past one instance
 
