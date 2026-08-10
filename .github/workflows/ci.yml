@@ -1,0 +1,225 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch makes an in-flight run obsolete. main is
+# excluded so a deploy is never cancelled halfway through.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    services:
+      # The suite defaults to SQLite; this is the second run's target, so the
+      # PostgreSQL-only paths (JSONB columns, advisory locks) are covered too.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sdip
+          POSTGRES_PASSWORD: sdip
+          POSTGRES_DB: sdip_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sdip -d sdip_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install dependencies
+        run: uv sync --project backend --locked
+
+      - name: Run tests (SQLite)
+        run: uv run --project backend pytest backend/tests
+
+      - name: Run tests (PostgreSQL)
+        env:
+          SDIP_TEST_DATABASE_URL: postgresql://sdip:sdip@localhost:5432/sdip_test
+        run: uv run --project backend pytest backend/tests
+
+  frontend:
+    name: Frontend tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # The same build the Dockerfile runs, so a broken bundle fails here
+      # rather than several minutes into the image build below.
+      - name: Build
+        run: npm run build
+
+  stack:
+    name: Integration and E2E tests
+    # Nothing here can pass while the unit suites are red, and the image build
+    # is the expensive part of the pipeline - so let them go first.
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    env:
+      APP_PORT: "8100"
+      SDIP_JWT_SECRET: ci-secret-not-used-outside-this-runner
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+          cache-dependency-glob: integration/uv.lock
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+
+      - name: Build the stack
+        run: docker compose build
+
+      - name: Start the stack
+        run: docker compose up -d --wait
+
+      # Integration first: it fails in seconds with a clear API-level message,
+      # while an E2E failure needs the trace to explain itself.
+      - name: Integration tests
+        run: uv run --project integration pytest integration/tests
+
+      - name: Install Playwright
+        working-directory: e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: End-to-end tests
+        working-directory: e2e
+        env:
+          # The stack is already up and stays under this job's control, so
+          # Playwright must not try to start a second one.
+          E2E_EXTERNAL_STACK: "1"
+        run: npm test
+
+      - name: Stack logs
+        if: failure()
+        run: docker compose logs --no-color --timestamps
+
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+          retention-days: 7
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v
+
+  deploy:
+    name: Deploy to production
+    needs: [stack]
+    # Skipped entirely until the deployment variables are configured - see
+    # "Continuous deployment" in README.md.
+    if: >-
+      github.event_name == 'push'
+      && github.ref == 'refs/heads/main'
+      && vars.SDIP_INSTANCE_ID != ''
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write # for the OIDC token exchanged for the AWS role
+      contents: read
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # The instance builds from a checkout of this repository (see
+      # deploy/aws/sdip-stack.yaml), so deploying is: fetch, move to this
+      # commit, rebuild. Session Manager is already on the instance role, so
+      # nothing needs an inbound SSH port.
+      - name: Roll the instance forward to ${{ github.sha }}
+        env:
+          INSTANCE_ID: ${{ vars.SDIP_INSTANCE_ID }}
+        run: |
+          set -euo pipefail
+
+          # Each element is one line of the script SSM runs as root. Built with
+          # jq so the commit SHA is quoted properly rather than by hand.
+          parameters=$(jq -nc --arg sha "$GITHUB_SHA" '{commands: [
+            "set -euo pipefail",
+            "cd /opt/sdip",
+            "git fetch --all --tags --prune",
+            "git checkout --detach \($sha)",
+            "docker compose -f docker-compose.prod.yaml up -d --build",
+            "docker image prune -f"
+          ]}')
+
+          command_id=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "Deploy ${GITHUB_SHA::7}" \
+            --timeout-seconds 1800 \
+            --parameters "$parameters" \
+            --query Command.CommandId --output text)
+          echo "SSM command: $command_id"
+
+          status=0
+          aws ssm wait command-executed \
+            --command-id "$command_id" --instance-id "$INSTANCE_ID" || status=$?
+
+          aws ssm get-command-invocation \
+            --command-id "$command_id" --instance-id "$INSTANCE_ID" \
+            --query StandardOutputContent --output text
+          if [ "$status" -ne 0 ]; then
+            aws ssm get-command-invocation \
+              --command-id "$command_id" --instance-id "$INSTANCE_ID" \
+              --query StandardErrorContent --output text >&2
+            exit 1
+          fi
+
+      - name: Smoke-test the deployment
+        if: vars.SDIP_PUBLIC_URL != ''
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if curl -fsS --max-time 10 "${{ vars.SDIP_PUBLIC_URL }}/health" | grep -q '"ok"'; then
+              echo "healthy after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "the deployment did not report healthy" >&2
+          exit 1

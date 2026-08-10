@@ -10,6 +10,13 @@ const repoRoot = path.resolve(__dirname, "..");
 const appPort = process.env.APP_PORT ?? "8100";
 const baseURL = process.env.E2E_BASE_URL ?? `http://localhost:${appPort}`;
 
+/**
+ * Set when something else owns the stack's lifecycle - CI brings it up once
+ * and runs the integration suite against it first. Playwright then neither
+ * starts nor stops it.
+ */
+const externalStack = !!process.env.E2E_EXTERNAL_STACK;
+
 export default defineConfig({
   testDir: "./tests",
   // Building the image and booting Postgres is slow; the tests themselves wait
@@ -33,16 +40,18 @@ export default defineConfig({
 
   projects: [{ name: "chromium" }],
 
-  webServer: {
-    // Foreground `up` so Playwright can stop the stack when the run finishes.
-    command: "docker compose up --build",
-    cwd: repoRoot,
-    url: baseURL,
-    env: { APP_PORT: appPort },
-    // The first run builds the frontend bundle and the Python image.
-    timeout: 900_000,
-    reuseExistingServer: !process.env.CI,
-    stdout: "pipe",
-    stderr: "pipe",
-  },
+  webServer: externalStack
+    ? undefined
+    : {
+        // Foreground `up` so Playwright can stop the stack when the run finishes.
+        command: "docker compose up --build",
+        cwd: repoRoot,
+        url: baseURL,
+        env: { APP_PORT: appPort },
+        // The first run builds the frontend bundle and the Python image.
+        timeout: 900_000,
+        reuseExistingServer: !process.env.CI,
+        stdout: "pipe",
+        stderr: "pipe",
+      },
 });

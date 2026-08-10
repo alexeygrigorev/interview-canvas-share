@@ -42,11 +42,15 @@ npm run report              # open the HTML report from the last CI-style run
 | --- | --- | --- |
 | `APP_PORT` | `8100` | Host port the compose stack publishes, matching `docker-compose.yaml` |
 | `E2E_BASE_URL` | `http://localhost:$APP_PORT` | Test an already-running deployment elsewhere |
+| `E2E_EXTERNAL_STACK` | unset | Someone else owns the stack: do not start or stop it |
 | `CI` | unset | Enables retries, the HTML report, and forbids reusing a running server |
 
 Pointing `E2E_BASE_URL` at a remote deployment still runs the compose
 `webServer` command locally unless that URL already answers — for a purely
-remote target, make sure the URL is reachable before the run starts.
+remote target, set `E2E_EXTERNAL_STACK=1` as well, which drops the `webServer`
+block entirely. That is what CI does: it brings the stack up once, runs the
+integration suite against it, and then runs this one, so Playwright must not
+start a second deployment on the same port.
 
 ## Notes on the fixtures
 

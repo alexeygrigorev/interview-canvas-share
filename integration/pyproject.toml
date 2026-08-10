@@ -1,0 +1,16 @@
+[project]
+name = "sdip-integration-tests"
+version = "0.1.0"
+description = "Integration tests that drive a deployed stack over HTTP and WebSocket"
+requires-python = ">=3.12"
+# Deliberately free of any dependency on the backend package: these tests only
+# ever speak the published API, exactly as a browser or another service would.
+dependencies = [
+    "httpx>=0.28.1",
+    "pytest>=8.4.0",
+    "websockets>=15.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

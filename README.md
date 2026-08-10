@@ -414,7 +414,36 @@ npm run dev
 
 See `backend/README.md` for more backend detail.
 
-## End-to-end tests
+## Tests
+
+Four suites, in the order CI runs them:
+
+| Suite | Lives in | Needs | Command |
+| --- | --- | --- | --- |
+| Backend | `backend/tests` | uv | `make test` |
+| Frontend unit | `frontend/src/**/*.test.ts` | Node | `make frontend-test` |
+| Integration | `integration/tests` | the running stack | `make up && make integration` |
+| End-to-end | `e2e/tests` | the running stack, Chromium | `make e2e` |
+
+The first two run in-process and need no services. The last two exercise a real
+deployment, so they catch what the unit suites structurally cannot: the built
+image, the frontend bundle it serves, PostgreSQL, and the WebSocket gateway.
+
+### Integration tests
+
+`integration/` drives the deployed API over HTTP and WebSocket without importing
+a line of the backend — login, the session lifecycle, guest links and cookies,
+canvas persistence, and realtime fan-out between two connected clients.
+
+```sh
+make up            # docker compose up -d --build --wait
+make integration
+make down
+```
+
+Point them at any deployment with `SDIP_BASE_URL`. See `integration/README.md`.
+
+### End-to-end tests
 
 `e2e/` holds Playwright tests that drive the compose deployment through a real
 browser: the interviewer logs in, creates a session, shares the join link, a
@@ -428,3 +457,55 @@ make e2e
 Playwright brings the stack up with `docker compose up --build` and stops it
 afterwards, reusing a deployment that is already running on the app port. See
 `e2e/README.md` for configuration and how to run it headed or in the debugger.
+
+## CI/CD
+
+`.github/workflows/ci.yml` runs on every pull request and on pushes to `main`:
+
+```
+Backend tests  ─┐
+                ├─► Integration and E2E tests ─► Deploy to production
+Frontend tests ─┘        (compose stack)          (main, if configured)
+```
+
+- **Backend tests** run the suite twice — once on SQLite, once against a
+  PostgreSQL service container — so the PostgreSQL-only paths (`JSONB` columns,
+  the advisory locks around seeding) are covered.
+- **Frontend tests** run the unit tests, `tsc --noEmit`, and the production
+  build, which is the same build the Dockerfile performs.
+- **Integration and E2E** build the image, bring up `docker-compose.yaml` once,
+  and run both suites against that one deployment. Integration goes first: it
+  fails in seconds with an API-level message, where a browser failure needs its
+  trace to explain itself. On failure the job prints the stack logs and uploads
+  the Playwright report and traces as an artifact.
+
+The two unit jobs run in parallel; the stack job waits for both, since the image
+build is the expensive part of the run and nothing can pass while a unit suite
+is red.
+
+### Continuous deployment
+
+The deploy job is skipped unless the repository has `SDIP_INSTANCE_ID` set, so
+the pipeline is CI-only until you configure it. It reproduces "Ship a new
+version" above without SSH: GitHub authenticates to AWS with OIDC, then Systems
+Manager runs `git checkout <sha> && docker compose -f docker-compose.prod.yaml
+up -d --build` on the instance. Session Manager access is already part of the
+instance role the CloudFormation stack creates.
+
+Set these repository variables (Settings → Secrets and variables → Actions →
+Variables):
+
+| Variable | Purpose |
+| --- | --- |
+| `SDIP_INSTANCE_ID` | The stack's `InstanceId` output. Also the on/off switch. |
+| `AWS_REGION` | Region the stack runs in, e.g. `eu-west-1`. |
+| `AWS_DEPLOY_ROLE_ARN` | Role assumed over OIDC. |
+| `SDIP_PUBLIC_URL` | Optional; polls `/health` after the deploy. |
+
+The role needs a trust policy for `token.actions.githubusercontent.com` limited
+to this repository, and permissions for `ssm:SendCommand` on the instance and on
+the `AWS-RunShellScript` document plus `ssm:GetCommandInvocation`. The job runs
+in a `production` environment, so a required reviewer there gates every deploy.
+
+Deploys are serial by design: the workflow's concurrency group does not cancel
+in-flight runs on `main`, so a half-finished rebuild is never interrupted.

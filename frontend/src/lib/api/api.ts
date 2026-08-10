@@ -9,9 +9,14 @@ import type {
 } from "./types";
 
 const DEFAULT_API_BASE_URL = import.meta.env.DEV ? "http://localhost:8091" : "";
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? DEFAULT_API_BASE_URL).replace(/\/$/, "");
-const DEV_EMAIL = import.meta.env.VITE_API_EMAIL ?? "avery@northwind.dev";
-const DEV_PASSWORD = import.meta.env.VITE_API_PASSWORD ?? "demo-password";
+// Bracket access: VITE_* variables reach import.meta.env through an index
+// signature, which the strict tsconfig will not let us read as properties.
+const API_BASE_URL = (import.meta.env["VITE_API_BASE_URL"] ?? DEFAULT_API_BASE_URL).replace(
+  /\/$/,
+  "",
+);
+const DEV_EMAIL = import.meta.env["VITE_API_EMAIL"] ?? "avery@northwind.dev";
+const DEV_PASSWORD = import.meta.env["VITE_API_PASSWORD"] ?? "demo-password";
 const ACCESS_TOKEN_KEY = "sdip.access-token";
 
 type ApiErrorBody = { code?: string; message?: string };
