@@ -2,7 +2,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { api, subscribe } from "@/lib/api/api";
+import { api, subscribe, subscribeConnection, type ConnectionState } from "@/lib/api/api";
 import type { CanvasElement, InterviewSession, Participant } from "@/lib/api/types";
 import { useCanvasDoc } from "@/lib/canvas/useCanvasDoc";
 import { useRoomPresence } from "@/lib/canvas/useRoomPresence";
@@ -163,7 +163,7 @@ function RoomInner({
   const [inkColor, setInkColor] = useState("#5eead4");
   const [inkWidth, setInkWidth] = useState(2);
   const [snapEnabled, setSnapEnabled] = useState(true);
-  const [connection] = useState<"connected" | "reconnecting" | "offline">("connected");
+  const [connection, setConnection] = useState<ConnectionState>("reconnecting");
   const vpApi = useRef<{
     zoomBy: (f: number) => void;
     fit: () => void;
@@ -171,6 +171,8 @@ function RoomInner({
     viewport: Viewport;
   } | null>(null);
   const [zoomLabel, setZoomLabel] = useState(100);
+
+  useEffect(() => subscribeConnection(session.id, setConnection), [session.id]);
 
   const registerViewportApi = useCallback((apiRef: NonNullable<typeof vpApi.current>) => {
     vpApi.current = apiRef;

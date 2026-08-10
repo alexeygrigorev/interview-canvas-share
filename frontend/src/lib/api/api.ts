@@ -28,6 +28,8 @@ export type RoomMessage =
   | { type: "permission_changed"; sessionId: string; session: InterviewSession }
   | { type: "session_ended"; sessionId: string };
 
+export type ConnectionState = "connected" | "reconnecting";
+
 interface TokenResponse {
   access_token: string;
   token_type: "bearer";
@@ -151,12 +153,20 @@ function sessionRequest<T>(sessionId: string, path: string, options?: RequestIni
 interface RoomConnection {
   socket: WebSocket | null;
   subscribers: Set<(message: RoomMessage) => void>;
+  connectionSubscribers: Set<(state: ConnectionState) => void>;
+  connectionState: ConnectionState;
   pending: RoomMessage[];
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   closed: boolean;
 }
 
 const rooms = new Map<string, RoomConnection>();
+
+function setConnectionState(room: RoomConnection, state: ConnectionState) {
+  if (room.connectionState === state) return;
+  room.connectionState = state;
+  room.connectionSubscribers.forEach((subscriber) => subscriber(state));
+}
 
 function websocketUrl(sessionId: string) {
   const url = new URL(API_BASE_URL || window.location.origin);
@@ -175,6 +185,7 @@ async function connect(sessionId: string, room: RoomConnection) {
   const socket = new WebSocket(websocketUrl(sessionId), protocols);
   room.socket = socket;
   socket.addEventListener("open", () => {
+    setConnectionState(room, "connected");
     for (const message of room.pending.splice(0)) socket.send(JSON.stringify(message));
   });
   socket.addEventListener("message", (event) => {
@@ -186,7 +197,10 @@ async function connect(sessionId: string, room: RoomConnection) {
     }
   });
   socket.addEventListener("close", (event) => {
-    if (room.socket === socket) room.socket = null;
+    if (room.socket === socket) {
+      room.socket = null;
+      setConnectionState(room, "reconnecting");
+    }
     if (event.code === 4401 && !isGuestSession(sessionId)) clearToken();
     if (!room.closed && room.subscribers.size > 0) {
       room.reconnectTimer = setTimeout(() => void connect(sessionId, room), 1000);
@@ -200,6 +214,8 @@ function getRoom(sessionId: string) {
     room = {
       socket: null,
       subscribers: new Set(),
+      connectionSubscribers: new Set(),
+      connectionState: "reconnecting",
       pending: [],
       reconnectTimer: null,
       closed: false,
@@ -231,6 +247,16 @@ export function subscribe(sessionId: string, handler: (message: RoomMessage) => 
       room.socket?.close(1000, "Room no longer in use");
       rooms.delete(sessionId);
     }
+  };
+}
+
+export function subscribeConnection(sessionId: string, handler: (state: ConnectionState) => void) {
+  if (typeof window === "undefined") return () => {};
+  const room = getRoom(sessionId);
+  room.connectionSubscribers.add(handler);
+  handler(room.connectionState);
+  return () => {
+    room.connectionSubscribers.delete(handler);
   };
 }
 
