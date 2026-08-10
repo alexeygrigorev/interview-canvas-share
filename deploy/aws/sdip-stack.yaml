@@ -266,11 +266,30 @@ Resources:
           echo "=== packages ==="
           dnf install -y docker git
 
-          echo "=== docker compose plugin ==="
+          echo "=== docker cli plugins ==="
+          # Amazon Linux 2023 ships neither plugin, and current Compose refuses
+          # to build an image without buildx 0.17+. The two projects name their
+          # release assets differently: compose uses uname's aarch64/x86_64,
+          # buildx uses arm64/amd64.
+          case "$(uname -m)" in
+            aarch64) COMPOSE_ARCH=aarch64; BUILDX_ARCH=arm64 ;;
+            x86_64)  COMPOSE_ARCH=x86_64;  BUILDX_ARCH=amd64 ;;
+            *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+
           install -d /usr/local/lib/docker/cli-plugins
-          curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m)" \
+          curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${!COMPOSE_ARCH}" \
             -o /usr/local/lib/docker/cli-plugins/docker-compose
-          chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose
+
+          # buildx embeds its version in the asset name, so there is no
+          # latest/download shortcut as there is for compose.
+          BUILDX_VERSION=$(curl -fsSL https://api.github.com/repos/docker/buildx/releases/latest \
+            | grep -m1 '"tag_name"' | cut -d'"' -f4)
+          curl -fsSL "https://github.com/docker/buildx/releases/download/${!BUILDX_VERSION}/buildx-${!BUILDX_VERSION}.linux-${!BUILDX_ARCH}" \
+            -o /usr/local/lib/docker/cli-plugins/docker-buildx
+
+          chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose \
+                     /usr/local/lib/docker/cli-plugins/docker-buildx
 
           systemctl enable --now docker
           usermod -aG docker ec2-user
