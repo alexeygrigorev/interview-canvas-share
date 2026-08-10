@@ -1,0 +1,67 @@
+# Production stack: Caddy terminates TLS on 80/443 and proxies to the app over
+# the compose network. Neither the app nor the database is published to the
+# host, so the only reachable ports are Caddy's. Local development uses
+# docker-compose.yaml instead — this file has no working defaults on purpose,
+# so a missing secret fails the deploy rather than silently shipping the
+# development one.
+#
+# The app runs as exactly one container and must stay that way: WebSocket
+# connections are held in process memory (backend/app/routers/realtime.py), so
+# a second replica would put participants of the same interview in separate
+# rooms — their edits would persist but never reach each other.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The app creates its tables on startup, so it must not start before the
+      # database accepts connections.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  app:
+    build: .
+    environment:
+      SDIP_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      SDIP_JWT_SECRET: ${SDIP_JWT_SECRET:?set SDIP_JWT_SECRET in .env}
+      SDIP_CORS_ORIGINS: https://${SDIP_DOMAIN:?set SDIP_DOMAIN in .env}
+    expose:
+      - "8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      SDIP_DOMAIN: ${SDIP_DOMAIN}
+      SDIP_TLS_EMAIL: ${SDIP_TLS_EMAIL:?set SDIP_TLS_EMAIL in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # caddy_data holds the issued certificates and the ACME account key.
+      # Without it every restart re-requests a certificate and quickly hits
+      # Let's Encrypt's rate limit for the domain.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

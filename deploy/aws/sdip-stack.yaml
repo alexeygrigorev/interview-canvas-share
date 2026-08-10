@@ -1,0 +1,339 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  System Design Interview Platform on a single EC2 instance. Caddy terminates
+  TLS and reverse-proxies to the app container; PostgreSQL runs alongside it in
+  Docker Compose. Deliberately one instance and one app container: WebSocket
+  connections live in the app's process memory, so a second replica would split
+  interview rooms.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Site
+        Parameters:
+          - DomainName
+          - TlsEmail
+      - Label:
+          default: Source
+        Parameters:
+          - RepoUrl
+          - RepoRef
+      - Label:
+          default: Instance
+        Parameters:
+          - InstanceType
+          - RootVolumeSize
+          - LatestAmiId
+      - Label:
+          default: Break-glass SSH (optional - Session Manager works without it)
+        Parameters:
+          - KeyName
+          - SshCidr
+
+Parameters:
+  DomainName:
+    Type: String
+    Description: >-
+      Domain to serve the app on, e.g. interviews.example.com. Point its DNS A
+      record at this stack's ElasticIp output - Caddy cannot get a certificate
+      until that resolves.
+    AllowedPattern: ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$
+    ConstraintDescription: must be a fully qualified domain name
+
+  TlsEmail:
+    Type: String
+    Description: Email address Let's Encrypt sends certificate expiry warnings to.
+    AllowedPattern: ^[^@\s]+@[^@\s]+\.[^@\s]+$
+    ConstraintDescription: must be an email address
+
+  RepoUrl:
+    Type: String
+    Description: >-
+      Git URL cloned on boot. Must be reachable without credentials - the
+      instance has none, so a private repo needs a deploy key added by hand.
+
+  RepoRef:
+    Type: String
+    Default: main
+    Description: Branch or tag to deploy.
+
+  InstanceType:
+    Type: String
+    Default: t4g.small
+    AllowedValues:
+      - t4g.small
+      - t4g.medium
+      - t4g.large
+    Description: >-
+      Graviton (arm64) types only, matching the default AMI. t4g.small is
+      enough to build and run the stack. To use x86, change LatestAmiId to the
+      al2023-ami-kernel-default-x86_64 path as well - a mismatch fails to boot.
+
+  RootVolumeSize:
+    Type: Number
+    Default: 20
+    MinValue: 12
+    Description: >-
+      Root EBS volume size in GiB. Holds the OS, the Docker build cache, the
+      images, and the PostgreSQL data volume.
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Description: Resolved from the SSM public parameter, so stack updates track the current Amazon Linux 2023 AMI.
+
+  KeyName:
+    Type: String
+    Default: ""
+    Description: >-
+      EC2 key pair name for SSH. Leave empty to manage the box exclusively
+      through Session Manager, which needs no open port and no key.
+
+  SshCidr:
+    Type: String
+    Default: ""
+    Description: >-
+      CIDR allowed to reach port 22, e.g. 203.0.113.4/32. Leave empty to open
+      no SSH ingress at all. Do not set 0.0.0.0/0.
+    AllowedPattern: ^$|^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$
+    ConstraintDescription: must be empty or a valid IPv4 CIDR
+
+Conditions:
+  HasKeyName: !Not [!Equals [!Ref KeyName, ""]]
+  EnableSsh: !Not [!Equals [!Ref SshCidr, ""]]
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-igw
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-public
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-public
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${AWS::StackName} public HTTP/HTTPS to Caddy
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - Description: HTTP for the HTTPS redirect and ACME challenges
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - Description: HTTPS and WebSockets
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - Description: HTTP/3
+          IpProtocol: udp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-sg
+
+  SshIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: EnableSsh
+    Properties:
+      GroupId: !Ref SecurityGroup
+      Description: SSH break-glass access
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp: !Ref SshCidr
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Grants shell access through Session Manager, so the stack needs no
+        # inbound SSH and no key pair.
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-eip
+
+  # Associated separately so the address is allocated before the instance
+  # launches and survives stopping or replacing it - the DNS record you point
+  # at it stays valid.
+  ElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ElasticIp.AllocationId
+      InstanceId: !Ref Instance
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref AWS::NoValue]
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: !Ref RootVolumeSize
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Shell tracing is deliberately off: this script generates the JWT and
+          # database secrets, and -x would copy them into the cloud-init log.
+          set -euo pipefail
+          exec > >(tee -a /var/log/sdip-bootstrap.log) 2>&1
+
+          echo "=== packages ==="
+          dnf install -y docker git
+
+          echo "=== docker compose plugin ==="
+          install -d /usr/local/lib/docker/cli-plugins
+          curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m)" \
+            -o /usr/local/lib/docker/cli-plugins/docker-compose
+          chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose
+
+          systemctl enable --now docker
+          usermod -aG docker ec2-user
+
+          echo "=== swap ==="
+          # The frontend bundle is built on this box and the Node build can spike
+          # past the smaller instance types' RAM and get OOM-killed.
+          if [ ! -f /swapfile ]; then
+            dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+            echo "/swapfile none swap sw 0 0" >> /etc/fstab
+          fi
+
+          echo "=== source ==="
+          if [ ! -d /opt/sdip/.git ]; then
+            git clone --branch "${RepoRef}" "${RepoUrl}" /opt/sdip
+          fi
+          cd /opt/sdip
+
+          echo "=== environment ==="
+          # Secrets are generated here and never leave the instance: they are
+          # not stack parameters, so they stay out of the template, the stack
+          # events, and the instance metadata.
+          if [ ! -f /opt/sdip/.env ]; then
+            umask 077
+            cat > /opt/sdip/.env <<'ENVEOF'
+          SDIP_DOMAIN=${DomainName}
+          SDIP_TLS_EMAIL=${TlsEmail}
+          POSTGRES_USER=sdip
+          POSTGRES_DB=sdip
+          ENVEOF
+            echo "POSTGRES_PASSWORD=$(openssl rand -hex 32)" >> /opt/sdip/.env
+            echo "SDIP_JWT_SECRET=$(openssl rand -hex 32)" >> /opt/sdip/.env
+          fi
+
+          echo "=== build and start ==="
+          # Containers carry restart: unless-stopped and docker is enabled, so
+          # the stack comes back on its own after a reboot.
+          docker compose -f docker-compose.prod.yaml up -d --build
+
+          echo "=== bootstrap complete ==="
+
+Outputs:
+  ElasticIp:
+    Description: Point your domain's DNS A record at this address.
+    Value: !Ref ElasticIp
+
+  Url:
+    Description: Live once DNS resolves and Caddy has issued the certificate.
+    Value: !Sub https://${DomainName}
+
+  InstanceId:
+    Value: !Ref Instance
+
+  SessionManagerCommand:
+    Description: Open a shell on the instance without SSH.
+    Value: !Sub aws ssm start-session --target ${Instance}
+
+  BootstrapLog:
+    Description: >-
+      Read this first if the site does not come up - the stack reports success
+      as soon as the instance launches, not when the app is serving.
+      /var/log/cloud-init-output.log has the same content plus cloud-init's own.
+    Value: /var/log/sdip-bootstrap.log

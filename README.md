@@ -188,6 +188,118 @@ docker run --rm -p 8000:8000 \
   --name sdip sdip:latest
 ```
 
+## Deploy to AWS
+
+`deploy/aws/sdip-stack.yaml` is a CloudFormation template that stands up the
+whole thing on one EC2 instance: a VPC with a single public subnet, an Elastic
+IP, a security group open only on 80 and 443, and an instance that clones this
+repository on boot and starts `docker-compose.prod.yaml`. That compose file adds
+[Caddy](https://caddyserver.com/) in front of the app, which obtains and renews
+a Let's Encrypt certificate automatically and proxies HTTPS and WebSocket
+traffic to the app container. Neither the app nor PostgreSQL is published to the
+host, so Caddy's ports are the only way in.
+
+One instance and one app container is a deliberate ceiling, not an oversight.
+`ConnectionManager` in `backend/app/routers/realtime.py` holds WebSocket
+connections in process memory, so a second replica would put participants of the
+same interview into separate rooms — their edits would reach the database but
+never each other. See *Scaling past one instance* below.
+
+### What you need first
+
+- A domain you can add an A record to.
+- AWS credentials with permission to create VPC, EC2, and IAM resources.
+- This repository reachable over HTTPS without credentials. The instance clones
+  it on boot and has no secrets, so a private repository needs a deploy key
+  installed by hand.
+
+### Deploy
+
+```sh
+aws cloudformation deploy \
+  --template-file deploy/aws/sdip-stack.yaml \
+  --stack-name sdip \
+  --capabilities CAPABILITY_IAM \
+  --parameter-overrides \
+      DomainName=interviews.example.com \
+      TlsEmail=you@example.com \
+      RepoUrl=https://github.com/you/ai-system-desing-canva.git
+```
+
+`CAPABILITY_IAM` is required because the stack creates an instance role granting
+Session Manager access — that is what lets you get a shell without opening port
+22 or managing a key pair. Add `KeyName` and `SshCidr` parameters only if you
+want conventional SSH as a fallback.
+
+Then read the Elastic IP out of the stack and point your domain at it:
+
+```sh
+aws cloudformation describe-stacks --stack-name sdip \
+  --query 'Stacks[0].Outputs' --output table
+```
+
+Certificate issuance fails until that A record resolves, which is normal on a
+first deploy — Caddy keeps retrying and the site comes up on its own once DNS
+propagates.
+
+### Watch the first boot
+
+The stack reports `CREATE_COMPLETE` as soon as the instance launches, not when
+the app is serving traffic. Building the frontend bundle and starting the
+containers takes several minutes more. To follow it:
+
+```sh
+aws ssm start-session --target <InstanceId from the stack outputs>
+sudo tail -f /var/log/sdip-bootstrap.log
+```
+
+The JWT signing secret and the database password are generated on the instance
+during that boot and written only to `/opt/sdip/.env` with mode `600`. They are
+not stack parameters, so they never appear in the template, the stack events, or
+the instance metadata. Regenerating `SDIP_JWT_SECRET` logs everyone out, which
+is the intended effect if you ever need to revoke every issued token.
+
+### Ship a new version
+
+```sh
+cd /opt/sdip
+sudo git pull
+sudo docker compose -f docker-compose.prod.yaml up -d --build
+```
+
+Rebuilding restarts the app container, which drops open WebSockets. Clients
+reconnect about a second later and reload the canvas from the database, so an
+interview in progress sees a brief "Reconnecting" badge rather than losing work.
+
+### Back up
+
+The PostgreSQL volume lives on the instance's root EBS volume, and deleting the
+stack terminates the instance and that volume with it. Nothing is backed up for
+you. At minimum, dump the database before any risky change:
+
+```sh
+sudo docker compose -f docker-compose.prod.yaml exec -T postgres \
+  pg_dump -U sdip sdip | gzip > "sdip-$(date +%F).sql.gz"
+```
+
+For anything you care about, put that on a cron job writing to S3, or move the
+database to RDS by pointing `SDIP_DATABASE_URL` at it and dropping the
+`postgres` service from the compose file.
+
+### What it costs
+
+Roughly $17/month in `us-east-1`: about $12 for the `t4g.small` instance, $1.60
+for 20 GiB of gp3, and $3.65 for the public IPv4 address. Data transfer for a
+handful of concurrent interviews is negligible.
+
+### Scaling past one instance
+
+When one box is no longer enough, the fix is contained to `broadcast_message` in
+`backend/app/routers/realtime.py:56`: replace the in-process fan-out with
+PostgreSQL `LISTEN`/`NOTIFY` — no new infrastructure, since the database is
+already there — or with Redis pub/sub. Only once every replica can reach every
+connection does adding replicas become safe.
+
 ## Run locally without Docker
 
 The backend uses [uv](https://docs.astral.sh/uv/) for dependency management:

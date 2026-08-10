@@ -1,0 +1,11 @@
+{
+	email {$SDIP_TLS_EMAIL}
+}
+
+{$SDIP_DOMAIN} {
+	# reverse_proxy passes WebSocket upgrades through untouched and streams
+	# without an idle timeout, so an open canvas stays connected even when
+	# nobody is drawing. Serving the UI and the API from this one origin also
+	# keeps the guest session cookie same-origin.
+	reverse_proxy app:8000
+}
