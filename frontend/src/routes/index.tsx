@@ -173,11 +173,6 @@ function Dashboard() {
             </tbody>
           </table>
         </div>
-
-        <p className="mt-6 text-xs text-muted-foreground">
-          Backend is mocked in the browser. Open a candidate link in a second tab to see realtime
-          presence and canvas sync.
-        </p>
       </main>
     </div>
   );
