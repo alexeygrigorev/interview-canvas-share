@@ -166,33 +166,22 @@ jobs:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      # The instance builds from a checkout of this repository (see
-      # deploy/aws/sdip-stack.yaml), so deploying is: fetch, move to this
-      # commit, rebuild. Session Manager is already on the instance role, so
-      # nothing needs an inbound SSH port.
+      # The steps themselves live in the SSM document the CloudFormation stack
+      # defines, not here: this role may run that one document against that one
+      # instance and nothing else, so it never holds shell access. The commit
+      # SHA is the only input, and the document's allowedPattern rejects
+      # anything that is not one.
       - name: Roll the instance forward to ${{ github.sha }}
         env:
           INSTANCE_ID: ${{ vars.SDIP_INSTANCE_ID }}
         run: |
           set -euo pipefail
-
-          # Each element is one line of the script SSM runs as root. Built with
-          # jq so the commit SHA is quoted properly rather than by hand.
-          parameters=$(jq -nc --arg sha "$GITHUB_SHA" '{commands: [
-            "set -euo pipefail",
-            "cd /opt/sdip",
-            "git fetch --all --tags --prune",
-            "git checkout --detach \($sha)",
-            "docker compose -f docker-compose.prod.yaml up -d --build",
-            "docker image prune -f"
-          ]}')
-
           command_id=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
-            --document-name AWS-RunShellScript \
+            --document-name "${{ vars.SDIP_DEPLOY_DOCUMENT }}" \
             --comment "Deploy ${GITHUB_SHA::7}" \
             --timeout-seconds 1800 \
-            --parameters "$parameters" \
+            --parameters "commit=$GITHUB_SHA" \
             --query Command.CommandId --output text)
           echo "SSM command: $command_id"
 
