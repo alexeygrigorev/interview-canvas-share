@@ -380,6 +380,10 @@ instance, $1.76 for 20 GiB of gp3, and $3.65 for the public IPv4 address. Data
 transfer for a handful of concurrent interviews is negligible. Instance and
 storage rates vary by region; the IPv4 charge does not.
 
+`EnableCloudFront=true` adds nothing meaningful: CloudFront's always-free tier
+covers 1 TB of egress and 10 million requests per month, which a handful of
+interviews will not approach.
+
 ### Scaling past one instance
 
 When one box is no longer enough, the fix is contained to `broadcast_message` in
