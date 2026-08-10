@@ -41,15 +41,15 @@ jobs:
           cache-dependency-glob: backend/uv.lock
 
       - name: Install dependencies
-        run: uv sync --project backend --locked
+        run: uv sync --project backend --frozen
 
       - name: Run tests (SQLite)
-        run: uv run --project backend pytest backend/tests
+        run: uv run --project backend --frozen pytest backend/tests
 
       - name: Run tests (PostgreSQL)
         env:
           SDIP_TEST_DATABASE_URL: postgresql://sdip:sdip@localhost:5432/sdip_test
-        run: uv run --project backend pytest backend/tests
+        run: uv run --project backend --frozen pytest backend/tests
 
   frontend:
     name: Frontend tests
@@ -112,7 +112,7 @@ jobs:
       # Integration first: it fails in seconds with a clear API-level message,
       # while an E2E failure needs the trace to explain itself.
       - name: Integration tests
-        run: uv run --project integration pytest integration/tests
+        run: uv run --project integration --frozen pytest integration/tests
 
       - name: Install Playwright
         working-directory: e2e
