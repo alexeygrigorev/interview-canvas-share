@@ -30,7 +30,10 @@ docker build -t sdip:latest .
 ### Run
 
 ```sh
-docker run --rm -p 8000:8000 --name sdip sdip:latest
+docker run --rm -p 8000:8000 \
+  -v sdip-data:/data \
+  -e SDIP_DATABASE_URL=sqlite:////data/sdip.db \
+  --name sdip sdip:latest
 ```
 
 The app listens on port `8000` inside the container. Open
@@ -38,12 +41,33 @@ The app listens on port `8000` inside the container. Open
 interactive API documentation. If port 8000 is already taken on your machine,
 map a different host port, for example `-p 8100:8000`.
 
+The `-v sdip-data:/data` flag keeps your data. It stores the SQLite database in
+a named Docker volume outside the container, so sessions and canvases survive
+restarts and you pick up where you left off every time you run the container.
+Without it the database lives inside the container and is thrown away the
+moment the container is removed, so every run starts from the seed data again.
+
+Note the four slashes in `sqlite:////data/sdip.db` — that is an absolute path
+to `/data/sdip.db`, the mounted volume. Three slashes would make it relative
+and write inside the container instead.
+
+The volume persists until you delete it explicitly. To inspect it or start over
+from a clean database:
+
+```sh
+docker volume ls                # list volumes
+docker volume rm sdip-data      # wipe the data and reseed on next run
+```
+
 To run it in the background and follow the logs:
 
 ```sh
-docker run -d -p 8000:8000 --name sdip sdip:latest
+docker run -d -p 8000:8000 \
+  -v sdip-data:/data \
+  -e SDIP_DATABASE_URL=sqlite:////data/sdip.db \
+  --name sdip sdip:latest
 docker logs -f sdip
-docker rm -f sdip   # stop and remove
+docker rm -f sdip   # stop and remove (the volume survives)
 ```
 
 The seeded demo users (`avery@northwind.dev`, `jordan@northwind.dev`,
@@ -62,19 +86,26 @@ All settings are environment variables passed with `-e`:
 | `SDIP_CORS_ORIGINS` | localhost dev origins | Comma-separated allowed origins |
 | `SDIP_STATIC_DIR` | `app/static` | Directory the frontend bundle is served from |
 
-By default the SQLite database lives inside the container and disappears when
-the container is removed. Mount a volume and point the database URL at it to
-keep data between runs:
+Set `SDIP_JWT_SECRET` to a real secret before running this anywhere but your
+own machine:
 
 ```sh
 docker run --rm -p 8000:8000 \
   -v sdip-data:/data \
   -e SDIP_DATABASE_URL=sqlite:////data/sdip.db \
-  -e SDIP_JWT_SECRET=change-me \
+  -e SDIP_JWT_SECRET=some-long-random-string \
   --name sdip sdip:latest
 ```
 
-Note the four slashes in `sqlite:////data/sdip.db` — that is an absolute path.
+If you would rather keep the database as a plain file in the project directory
+instead of a named volume, bind-mount a host directory:
+
+```sh
+docker run --rm -p 8000:8000 \
+  -v "$(pwd)/data:/data" \
+  -e SDIP_DATABASE_URL=sqlite:////data/sdip.db \
+  --name sdip sdip:latest
+```
 
 ## Run locally without Docker
 
