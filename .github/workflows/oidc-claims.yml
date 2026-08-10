@@ -1,0 +1,29 @@
+name: OIDC claims
+
+# Temporary: prints the subject claim GitHub actually mints for a job in the
+# production environment, so the AWS trust policy can pin the exact string.
+# Delete once the deploy role is known good.
+on:
+  workflow_dispatch:
+
+jobs:
+  claims:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+    steps:
+      - name: Decode the token's claims
+        run: |
+          set -euo pipefail
+          token=$(curl -sSf \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          # Only the payload, never the token itself: the signature is what
+          # makes it a credential.
+          payload=$(printf '%s' "$token" | cut -d. -f2 | tr '_-' '/+')
+          case $(( ${#payload} % 4 )) in
+            2) payload="${payload}==" ;;
+            3) payload="${payload}=" ;;
+          esac
+          printf '%s' "$payload" | base64 -d | jq '{sub, aud, repository, environment, repository_id, repository_owner_id}'
