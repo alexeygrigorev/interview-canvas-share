@@ -249,6 +249,23 @@ Certificate issuance fails until that A record resolves, which is normal on a
 first deploy — Caddy keeps retrying and the site comes up on its own once DNS
 propagates.
 
+### Running before you have a domain
+
+Caddy accepts an `http://` site address as an explicit instruction to serve
+without TLS and skip certificate issuance entirely, so you can bring the stack
+up on the bare Elastic IP while DNS is still pending:
+
+```sh
+sed -i 's|^SDIP_DOMAIN=.*|SDIP_DOMAIN=http://203.0.113.10|' /opt/sdip/.env
+docker compose -f docker-compose.prod.yaml up -d
+```
+
+The app is fully functional this way — the page and its WebSocket are both plain
+HTTP from the same origin, so nothing is blocked as mixed content. It is only
+appropriate for verifying a deployment: access tokens and the guest session
+cookie cross the network in the clear. Switch `SDIP_DOMAIN` back to a hostname
+and restart to get HTTPS.
+
 ### Watch the first boot
 
 The stack reports `CREATE_COMPLETE` as soon as the instance launches, not when

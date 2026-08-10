@@ -24,6 +24,7 @@ Metadata:
           default: Instance
         Parameters:
           - InstanceType
+          - BuildxVersion
           - RootVolumeSize
           - LatestAmiId
       - Label:
@@ -78,6 +79,14 @@ Parameters:
     Description: >-
       Root EBS volume size in GiB. Holds the OS, the Docker build cache, the
       images, and the PostgreSQL data volume.
+
+  BuildxVersion:
+    Type: String
+    Default: v0.36.1
+    AllowedPattern: ^v[0-9]+\.[0-9]+\.[0-9]+$
+    Description: >-
+      Docker buildx plugin release to install. Amazon Linux 2023 ships no
+      buildx, and Compose will not build an image without 0.17 or later.
 
   LatestAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
@@ -281,11 +290,11 @@ Resources:
           curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${!COMPOSE_ARCH}" \
             -o /usr/local/lib/docker/cli-plugins/docker-compose
 
-          # buildx embeds its version in the asset name, so there is no
-          # latest/download shortcut as there is for compose.
-          BUILDX_VERSION=$(curl -fsSL https://api.github.com/repos/docker/buildx/releases/latest \
-            | grep -m1 '"tag_name"' | cut -d'"' -f4)
-          curl -fsSL "https://github.com/docker/buildx/releases/download/${!BUILDX_VERSION}/buildx-${!BUILDX_VERSION}.linux-${!BUILDX_ARCH}" \
+          # buildx embeds its version in the asset name, so unlike compose there
+          # is no latest/download shortcut. Pinned rather than resolved from the
+          # GitHub API, which keeps the bootstrap deterministic and offline of
+          # rate limits.
+          curl -fsSL "https://github.com/docker/buildx/releases/download/${BuildxVersion}/buildx-${BuildxVersion}.linux-${!BUILDX_ARCH}" \
             -o /usr/local/lib/docker/cli-plugins/docker-buildx
 
           chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose \
