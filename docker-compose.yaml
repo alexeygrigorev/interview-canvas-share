@@ -26,7 +26,7 @@ services:
       SDIP_DATABASE_URL: postgresql://${POSTGRES_USER:-sdip}:${POSTGRES_PASSWORD:-sdip}@postgres:5432/${POSTGRES_DB:-sdip}
       SDIP_JWT_SECRET: ${SDIP_JWT_SECRET:-local-development-secret-change-me}
     ports:
-      - "${APP_PORT:-8000}:8000"
+      - "${APP_PORT:-8100}:8000"
     depends_on:
       postgres:
         condition: service_healthy
