@@ -358,6 +358,9 @@ Rebuilding restarts the app container, which drops open WebSockets. Clients
 reconnect about a second later and reload the canvas from the database, so an
 interview in progress sees a brief "Reconnecting" badge rather than losing work.
 
+These are the same steps the stack's `<stack>-deploy` SSM document runs, so a
+push to `main` can do it for you — see "Continuous deployment" below.
+
 ### Back up
 
 The PostgreSQL volume lives on the instance's root EBS volume, and deleting the
@@ -487,25 +490,70 @@ is red.
 
 The deploy job is skipped unless the repository has `SDIP_INSTANCE_ID` set, so
 the pipeline is CI-only until you configure it. It reproduces "Ship a new
-version" above without SSH: GitHub authenticates to AWS with OIDC, then Systems
-Manager runs `git checkout <sha> && docker compose -f docker-compose.prod.yaml
-up -d --build` on the instance. Session Manager access is already part of the
-instance role the CloudFormation stack creates.
+version" above without SSH: GitHub authenticates to AWS with OIDC and asks
+Systems Manager to run the stack's deploy document on the instance.
 
-Set these repository variables (Settings → Secrets and variables → Actions →
-Variables):
+There are no long-lived AWS keys anywhere. GitHub mints a short-lived OIDC
+token per job, AWS exchanges it for temporary credentials, and the trust policy
+decides who may make that exchange.
 
-| Variable | Purpose |
+**Create the role.** It is part of the CloudFormation stack — redeploy with
+your repository name, and the template creates the account's GitHub OIDC
+provider (set `CreateGitHubOidcProvider=false` if the account already has one),
+the deploy document, and the role:
+
+```sh
+aws cloudformation deploy \
+  --template-file deploy/aws/sdip-stack.yaml \
+  --stack-name sdip \
+  --capabilities CAPABILITY_IAM \
+  --parameter-overrides \
+      GitHubRepository=you/interview-canvas-share \
+      DomainName=interviews.example.com \
+      TlsEmail=you@example.com \
+      RepoUrl=https://github.com/you/interview-canvas-share.git
+```
+
+**Point the workflow at it.** The stack's `GitHubVariablesCommand` output is
+the exact command to run; it expands to:
+
+```sh
+gh variable set AWS_REGION           --body eu-west-1
+gh variable set AWS_DEPLOY_ROLE_ARN  --body arn:aws:iam::123456789012:role/sdip-GitHubDeployRole-...
+gh variable set SDIP_DEPLOY_DOCUMENT --body sdip-deploy
+gh variable set SDIP_INSTANCE_ID     --body i-0123456789abcdef0
+gh variable set SDIP_PUBLIC_URL      --body https://interviews.example.com   # optional
+```
+
+`SDIP_INSTANCE_ID` is the on/off switch; `SDIP_PUBLIC_URL` is optional and only
+adds a `/health` poll after the deploy. The `production` environment must exist
+in the repository — create it, and add required reviewers there if you want a
+human gate before each deploy.
+
+**What the role can do.** Only two things, and neither is shell access:
+
+| Action | Scoped to |
 | --- | --- |
-| `SDIP_INSTANCE_ID` | The stack's `InstanceId` output. Also the on/off switch. |
-| `AWS_REGION` | Region the stack runs in, e.g. `eu-west-1`. |
-| `AWS_DEPLOY_ROLE_ARN` | Role assumed over OIDC. |
-| `SDIP_PUBLIC_URL` | Optional; polls `/health` after the deploy. |
+| `ssm:SendCommand` | this instance, and only the `<stack>-deploy` document |
+| `ssm:GetCommandInvocation` | `*` — SSM defines no resource types for it |
 
-The role needs a trust policy for `token.actions.githubusercontent.com` limited
-to this repository, and permissions for `ssm:SendCommand` on the instance and on
-the `AWS-RunShellScript` document plus `ssm:GetCommandInvocation`. The job runs
-in a `production` environment, so a required reviewer there gates every deploy.
+The deployment steps live in the SSM document inside the template, not in the
+workflow, and that is the whole point. Granting `SendCommand` on the AWS-owned
+`AWS-RunShellScript` document — the usual shortcut — would let anything holding
+this role run arbitrary commands as root on the instance. Here the only input
+is the commit SHA, and the document's `allowedPattern` rejects anything that is
+not one, so the worst a stolen token can do is redeploy some commit of this
+repository. Changing *what* a deploy does means changing the template, which is
+reviewed and versioned like the rest of the infrastructure.
+
+The trust policy pins the token's subject to
+`repo:<owner>/<repo>:environment:production`. That claim is the environment
+form — **not** `ref:refs/heads/main` — because the job declares an
+`environment:`. Using the ref form is the usual cause of "Not authorized to
+perform sts:AssumeRoleWithWebIdentity" on a first deploy. Pinning the
+environment also means a fork's pull request cannot assume the role: forks
+cannot reach a protected environment, and the audience check keeps unrelated
+workflows out entirely.
 
 Deploys are serial by design: the workflow's concurrency group does not cancel
 in-flight runs on `main`, so a half-finished rebuild is never interrupted.
