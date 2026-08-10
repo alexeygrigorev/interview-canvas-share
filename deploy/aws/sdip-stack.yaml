@@ -32,6 +32,7 @@ Metadata:
         Parameters:
           - GitHubRepository
           - GitHubEnvironment
+          - GitHubSubjectPrefix
           - CreateGitHubOidcProvider
       - Label:
           default: Break-glass SSH (optional - Session Manager works without it)
@@ -142,6 +143,19 @@ Parameters:
       the environment, not the branch, whenever a job declares one.
     MinLength: 1
 
+  GitHubSubjectPrefix:
+    Type: String
+    Default: ""
+    Description: >-
+      Overrides the "repo:owner/repo" prefix of the OIDC subject claim. Some
+      repositories mint immutable subjects carrying numeric IDs instead
+      (repo:owner@875246/repo@1321814459), which no amount of renaming or
+      re-creating can spoof. Read yours with `gh api
+      repos/OWNER/REPO/actions/oidc/customization/sub` and paste
+      sub_claim_prefix here when it is not the plain owner/repo form -
+      otherwise the role refuses every deploy with "Not authorized to perform
+      sts:AssumeRoleWithWebIdentity".
+
   CreateGitHubOidcProvider:
     Type: String
     Default: "true"
@@ -176,6 +190,7 @@ Conditions:
   # us-east-1 predates the regional naming scheme for EC2 public DNS names.
   IsUsEast1: !Equals [!Ref "AWS::Region", us-east-1]
   HasGitHubRepo: !Not [!Equals [!Ref GitHubRepository, ""]]
+  HasSubjectPrefix: !Not [!Equals [!Ref GitHubSubjectPrefix, ""]]
   CreateOidcProvider: !And
     - !Not [!Equals [!Ref GitHubRepository, ""]]
     - !Equals [!Ref CreateGitHubOidcProvider, "true"]
@@ -388,7 +403,10 @@ Resources:
                 # fork - which cannot reach a protected environment - cannot
                 # assume this role even from a branch of this repository.
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepository}:environment:${GitHubEnvironment}
+                token.actions.githubusercontent.com:sub: !If
+                  - HasSubjectPrefix
+                  - !Sub ${GitHubSubjectPrefix}:environment:${GitHubEnvironment}
+                  - !Sub repo:${GitHubRepository}:environment:${GitHubEnvironment}
       Policies:
         - PolicyName: deploy
           PolicyDocument:
