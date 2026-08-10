@@ -249,6 +249,70 @@ Certificate issuance fails until that A record resolves, which is normal on a
 first deploy — Caddy keeps retrying and the site comes up on its own once DNS
 propagates.
 
+### The DNS record is not part of the stack
+
+The template allocates the Elastic IP and outputs it, but never creates the A
+record. That is deliberate: a `AWS::Route53::RecordSet` would need a hosted
+zone id and would assume the domain is hosted in Route53 in this same account,
+and plenty of domains live at a registrar or at Cloudflare instead.
+
+The cost of that choice is that the record's lifecycle is yours, at both ends.
+Create it after the stack comes up, and **delete it after you delete the
+stack** — the Elastic IP goes back into the AWS pool on release, so a record
+left behind eventually points at a stranger's server.
+
+With the zone in Route53, both directions are one call:
+
+```sh
+zone=$(aws route53 list-hosted-zones-by-name --dns-name example.com \
+  --query 'HostedZones[0].Id' --output text)
+ip=$(aws cloudformation describe-stacks --stack-name sdip \
+  --query "Stacks[0].Outputs[?OutputKey=='ElasticIp'].OutputValue" --output text)
+
+# UPSERT to create or repoint it; DELETE, with the same values, to remove it.
+aws route53 change-resource-record-sets --hosted-zone-id "$zone" --change-batch "{
+  \"Changes\": [{\"Action\": \"UPSERT\", \"ResourceRecordSet\": {
+    \"Name\": \"interviews.example.com.\", \"Type\": \"A\", \"TTL\": 60,
+    \"ResourceRecords\": [{\"Value\": \"$ip\"}]}}]}"
+```
+
+A `DELETE` change must repeat the record's current name, type, TTL and value
+exactly, so read it back with `list-resource-record-sets` before removing it
+rather than retyping it from memory.
+
+### Delete the stack
+
+Deleting takes the instance, its root volume, and the database on that volume
+with it. Nothing is backed up for you, so dump first if the data matters:
+
+```sh
+aws ssm start-session --target "$(aws cloudformation describe-stacks \
+  --stack-name sdip --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" \
+  --output text)"
+# on the instance:
+cd /opt/sdip && sudo docker compose -f docker-compose.prod.yaml exec -T postgres \
+  pg_dump -U sdip sdip | gzip > /tmp/sdip.sql.gz
+```
+
+Then, in order:
+
+```sh
+# 1. the DNS record, which the stack does not own (see above)
+# 2. the stack itself
+aws cloudformation delete-stack --stack-name sdip
+aws cloudformation wait stack-delete-complete --stack-name sdip
+# 3. the deploy variables, or every later push fails against a dead instance
+gh variable delete SDIP_INSTANCE_ID
+gh variable delete SDIP_DEPLOY_DOCUMENT
+gh variable delete AWS_DEPLOY_ROLE_ARN
+gh variable delete SDIP_PUBLIC_URL
+```
+
+Deleting `SDIP_INSTANCE_ID` alone is enough to make CI skip the deploy job
+again; the rest is tidiness. The account's GitHub OIDC provider survives if
+this stack did not create it (`CreateGitHubOidcProvider=false`), since it is
+shared with every other repository that deploys into the account.
+
 ### HTTPS without a domain, via CloudFront
 
 Browsers will not open a `wss://` WebSocket without a valid certificate, and
