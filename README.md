@@ -223,7 +223,7 @@ aws cloudformation deploy \
   --parameter-overrides \
       DomainName=interviews.example.com \
       TlsEmail=you@example.com \
-      RepoUrl=https://github.com/you/ai-system-desing-canva.git
+      RepoUrl=https://github.com/alexeygrigorev/interview-canvas-share.git
 ```
 
 Nothing in the template is region-specific — the subnet takes the first
@@ -265,7 +265,7 @@ aws cloudformation deploy \
       DomainName= \
       EnableCloudFront=true \
       TlsEmail=you@example.com \
-      RepoUrl=https://github.com/you/ai-system-desing-canva.git
+      RepoUrl=https://github.com/alexeygrigorev/interview-canvas-share.git
 ```
 
 Leaving `DomainName` empty tells the bootstrap to configure Caddy as a plain
@@ -508,10 +508,10 @@ aws cloudformation deploy \
   --stack-name sdip \
   --capabilities CAPABILITY_IAM \
   --parameter-overrides \
-      GitHubRepository=you/interview-canvas-share \
+      GitHubRepository=alexeygrigorev/interview-canvas-share \
       DomainName=interviews.example.com \
       TlsEmail=you@example.com \
-      RepoUrl=https://github.com/you/interview-canvas-share.git
+      RepoUrl=https://github.com/alexeygrigorev/interview-canvas-share.git
 ```
 
 **Point the workflow at it.** The stack's `GitHubVariablesCommand` output is

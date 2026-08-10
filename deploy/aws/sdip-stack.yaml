@@ -80,6 +80,7 @@ Parameters:
 
   RepoUrl:
     Type: String
+    Default: https://github.com/alexeygrigorev/interview-canvas-share.git
     Description: >-
       Git URL cloned on boot. Must be reachable without credentials - the
       instance has none, so a private repo needs a deploy key added by hand.
