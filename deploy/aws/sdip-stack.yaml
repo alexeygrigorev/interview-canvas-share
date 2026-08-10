@@ -36,12 +36,35 @@ Metadata:
 Parameters:
   DomainName:
     Type: String
+    Default: ""
     Description: >-
       Domain to serve the app on, e.g. interviews.example.com. Point its DNS A
       record at this stack's ElasticIp output - Caddy cannot get a certificate
-      until that resolves.
-    AllowedPattern: ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$
-    ConstraintDescription: must be a fully qualified domain name
+      until that resolves. Leave empty to serve plain HTTP instead, which is the
+      right choice only when EnableCloudFront is true and CloudFront terminates
+      TLS on its own domain.
+    AllowedPattern: ^$|^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$
+    ConstraintDescription: must be empty or a fully qualified domain name
+
+  EnableCloudFront:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Put a CloudFront distribution in front of the instance and serve HTTPS on
+      its free *.cloudfront.net domain. Use this when you have no domain of your
+      own. Port 80 is then reachable only from CloudFront, so the origin stops
+      answering the public internet directly.
+
+  CloudFrontPrefixListId:
+    Type: String
+    Default: pl-4fa04526
+    Description: >-
+      The com.amazonaws.global.cloudfront.origin-facing managed prefix list,
+      used to restrict port 80 to CloudFront. This ID is REGION SPECIFIC; the
+      default is eu-west-1. Find yours with: aws ec2
+      describe-managed-prefix-lists --filters
+      Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing
 
   TlsEmail:
     Type: String
@@ -112,6 +135,11 @@ Parameters:
 Conditions:
   HasKeyName: !Not [!Equals [!Ref KeyName, ""]]
   EnableSsh: !Not [!Equals [!Ref SshCidr, ""]]
+  HasDomain: !Not [!Equals [!Ref DomainName, ""]]
+  UseCloudFront: !Equals [!Ref EnableCloudFront, "true"]
+  DirectHttpAccess: !Not [!Equals [!Ref EnableCloudFront, "true"]]
+  # us-east-1 predates the regional naming scheme for EC2 public DNS names.
+  IsUsEast1: !Equals [!Ref "AWS::Region", us-east-1]
 
 Resources:
   Vpc:
@@ -175,12 +203,10 @@ Resources:
     Properties:
       GroupDescription: !Sub ${AWS::StackName} public HTTP/HTTPS to Caddy
       VpcId: !Ref Vpc
+      # Port 80 is granted below, conditionally: to the world when Caddy serves
+      # traffic directly, or to CloudFront only when it fronts the origin. 443 is
+      # used by Caddy in domain mode and simply goes unused otherwise.
       SecurityGroupIngress:
-        - Description: HTTP for the HTTPS redirect and ACME challenges
-          IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 0.0.0.0/0
         - Description: HTTPS and WebSockets
           IpProtocol: tcp
           FromPort: 443
@@ -194,6 +220,28 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub ${AWS::StackName}-sg
+
+  HttpIngressPublic:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: DirectHttpAccess
+    Properties:
+      GroupId: !Ref SecurityGroup
+      Description: HTTP for the HTTPS redirect and ACME challenges
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: 0.0.0.0/0
+
+  HttpIngressCloudFront:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: UseCloudFront
+    Properties:
+      GroupId: !Ref SecurityGroup
+      Description: HTTP from CloudFront edge locations only
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourcePrefixListId: !Ref CloudFrontPrefixListId
 
   SshIngress:
     Type: AWS::EC2::SecurityGroupIngress
@@ -243,6 +291,55 @@ Resources:
     Properties:
       AllocationId: !GetAtt ElasticIp.AllocationId
       InstanceId: !Ref Instance
+
+  # Serves HTTPS on a free *.cloudfront.net domain, which is the only way to get
+  # a browser-trusted certificate without owning a domain. Note this is not
+  # end-to-end encryption: the viewer-to-CloudFront hop is HTTPS, but
+  # CloudFront-to-origin is plain HTTP, since the origin has no certificate to
+  # present. A real domain with Caddy issuing its own certificate is strictly
+  # better; this exists for when there is no domain to use.
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Condition: UseCloudFront
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub ${AWS::StackName} - System Design Interview Platform
+        # PriceClass_100 is the cheapest tier: North America and Europe edges.
+        PriceClass: PriceClass_100
+        HttpVersion: http2and3
+        Origins:
+          # CloudFront rejects a bare IP address as an origin, so address the
+          # instance by the public DNS name that AWS derives from its Elastic IP.
+          - Id: instance
+            DomainName: !Sub
+              - ec2-${Dashed}.${Suffix}
+              - Dashed: !Join ["-", !Split [".", !Ref ElasticIp]]
+                Suffix: !If
+                  - IsUsEast1
+                  - compute-1.amazonaws.com
+                  - !Sub ${AWS::Region}.compute.amazonaws.com
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+              HTTPPort: 80
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 60
+        DefaultCacheBehavior:
+          TargetOriginId: instance
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          # The app is entirely dynamic and authenticated, so nothing may be
+          # cached and every header, cookie and query string has to reach the
+          # origin - including the Upgrade and Sec-WebSocket-* headers that make
+          # the realtime canvas work.
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          # AllViewerExceptHostHeader, so the origin receives its own hostname
+          # rather than the CloudFront one.
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+          AllowedMethods: [DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT]
+          CachedMethods: [GET, HEAD]
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
 
   Instance:
     Type: AWS::EC2::Instance
@@ -321,17 +418,25 @@ Resources:
           cd /opt/sdip
 
           echo "=== environment ==="
+          # An empty DomainName means nothing here terminates TLS, which is the
+          # mode used when CloudFront does it instead. Caddy reads a bare :80 as
+          # "serve plain HTTP for any Host", so it answers CloudFront regardless
+          # of which Host header reaches the origin.
+          SITE_ADDRESS="${DomainName}"
+          if [ -z "${!SITE_ADDRESS}" ]; then SITE_ADDRESS=":80"; fi
+          echo "site address: ${!SITE_ADDRESS}"
+
           # Secrets are generated here and never leave the instance: they are
           # not stack parameters, so they stay out of the template, the stack
           # events, and the instance metadata.
           if [ ! -f /opt/sdip/.env ]; then
             umask 077
             cat > /opt/sdip/.env <<'ENVEOF'
-          SDIP_DOMAIN=${DomainName}
-          SDIP_TLS_EMAIL=${TlsEmail}
           POSTGRES_USER=sdip
           POSTGRES_DB=sdip
           ENVEOF
+            echo "SDIP_DOMAIN=${!SITE_ADDRESS}" >> /opt/sdip/.env
+            echo "SDIP_TLS_EMAIL=${TlsEmail}" >> /opt/sdip/.env
             echo "POSTGRES_PASSWORD=$(openssl rand -hex 32)" >> /opt/sdip/.env
             echo "SDIP_JWT_SECRET=$(openssl rand -hex 32)" >> /opt/sdip/.env
           fi
@@ -349,8 +454,16 @@ Outputs:
     Value: !Ref ElasticIp
 
   Url:
+    Condition: HasDomain
     Description: Live once DNS resolves and Caddy has issued the certificate.
     Value: !Sub https://${DomainName}
+
+  CloudFrontUrl:
+    Condition: UseCloudFront
+    Description: >-
+      HTTPS on CloudFront's own certificate, with no domain required. Takes a few
+      minutes to become available after the distribution is created.
+    Value: !Sub https://${CloudFrontDistribution.DomainName}
 
   InstanceId:
     Value: !Ref Instance

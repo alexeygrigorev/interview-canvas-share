@@ -249,6 +249,69 @@ Certificate issuance fails until that A record resolves, which is normal on a
 first deploy — Caddy keeps retrying and the site comes up on its own once DNS
 propagates.
 
+### HTTPS without a domain, via CloudFront
+
+Browsers will not open a `wss://` WebSocket without a valid certificate, and
+certificate authorities only issue for domains you can prove you control. If you
+have no domain, CloudFront is the way out: every distribution comes with a free
+`*.cloudfront.net` hostname and a browser-trusted certificate.
+
+```sh
+aws cloudformation deploy \
+  --template-file deploy/aws/sdip-stack.yaml \
+  --stack-name sdip \
+  --capabilities CAPABILITY_IAM \
+  --parameter-overrides \
+      DomainName= \
+      EnableCloudFront=true \
+      TlsEmail=you@example.com \
+      RepoUrl=https://github.com/you/ai-system-desing-canva.git
+```
+
+Leaving `DomainName` empty tells the bootstrap to configure Caddy as a plain
+HTTP server on `:80` for any `Host`, since CloudFront is terminating TLS
+instead. `EnableCloudFront=true` then also narrows port 80 to the
+`com.amazonaws.global.cloudfront.origin-facing` prefix list, so the origin stops
+answering the public internet and the only route in is HTTPS through CloudFront.
+Read the URL from the `CloudFrontUrl` stack output; the distribution takes a few
+minutes to reach every edge.
+
+Two things to understand about this mode:
+
+- **It is not end-to-end encryption.** Viewer-to-CloudFront is HTTPS, but
+  CloudFront-to-origin is plain HTTP across the public internet, because the
+  origin has no certificate to present. A real domain with Caddy issuing its own
+  certificate is strictly better. This exists for when there is no domain.
+- **`CloudFrontPrefixListId` is region specific.** The default is the eu-west-1
+  ID. In another region, look yours up:
+
+  ```sh
+  aws ec2 describe-managed-prefix-lists \
+    --filters Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing \
+    --query 'PrefixLists[].PrefixListId' --output text
+  ```
+
+The distribution disables caching entirely and forwards every method, header,
+cookie and query string to the origin. That is deliberate: the app is fully
+dynamic and authenticated, and the `Upgrade` and `Sec-WebSocket-*` headers have
+to survive the trip or the realtime canvas silently stops syncing.
+
+### Changing the bootstrap replaces the instance
+
+Any edit to the template's `UserData` — including switching `DomainName` between
+empty and set — changes the instance's launch configuration, so CloudFormation
+replaces the instance rather than updating it in place. **That destroys the
+PostgreSQL volume with it.** Check `aws cloudformation deploy
+--no-execute-changeset` and inspect the change set for `Replacement` before
+applying an update to a stack holding data you care about, and take a dump
+first:
+
+```sh
+aws cloudformation describe-change-set --change-set-name <arn> \
+  --query 'Changes[].ResourceChange.{Id:LogicalResourceId,Replacement:Replacement}' \
+  --output table
+```
+
 ### Running before you have a domain
 
 Caddy accepts an `http://` site address as an explicit instruction to serve
