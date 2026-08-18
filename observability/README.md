@@ -49,39 +49,63 @@ metrics from different deployments apart in Grafana.
 
 ### Dev and production, sharing one stack
 
-`sdip` and `sdip-prod` each run on their own EC2 instance
-(`t4g.small`, 2GB RAM) with Postgres and the app already on it — running a
-full second copy of this stack on each is real, avoidable memory pressure on
-an already-small box. Since every trace and metric already carries
-`deployment.environment` (`SDIP_ENVIRONMENT`, wired in `backend/app/telemetry.py`)
-as a resource attribute, one shared stack works instead: it's the label the
-provisioned dashboard filters and splits on (see below), so dev and
-production stay visually distinct even sharing storage.
+`sdip` and `sdip-prod` each run on their own EC2 instance with Postgres and
+the app already on it — running a full second copy of this stack on either
+is real, avoidable memory pressure on an already-small box. Since every
+trace and metric already carries `deployment.environment`
+(`SDIP_ENVIRONMENT`, wired in `backend/app/telemetry.py`) as a resource
+attribute, one shared stack works instead: it's the label the provisioned
+dashboard filters and splits on, so dev and production stay visually
+distinct even sharing storage.
 
-Run the stack on **one** instance only (recommend `sdip`/dev — it's the one
-CI already deploys to automatically, and the lower-stakes box to experiment
-on). That instance's own app reaches it over the Docker network as usual
-(`http://otel-collector:4318`). The *other* instance's app has no Docker
-network in common with it — they're separate hosts — so it has to reach the
-collector over the network by IP instead:
-
-```
-# On the instance NOT hosting the stack, in its .env:
-OTEL_EXPORTER_OTLP_ENDPOINT=http://<elastic-ip-of-the-hosting-instance>:4318
-```
-
-That only works once the hosting instance's security group allows inbound
-4318 (and 4317, if using gRPC) from the other instance's Elastic IP
-specifically — OTLP has no auth of its own, so this is the only thing
-stopping anyone else on the internet from writing traces and metrics into
-your stack. Don't open it to `0.0.0.0/0`.
-
-Everything else (Grafana, Prometheus, Tempo, Loki query APIs) stays bound to
-the host's loopback interface only (see below) — reach those over an SSM
-port-forward or SSH tunnel, never by opening more inbound ports:
+That shared stack runs on its own dedicated EC2 instance, deployed from
+**`deploy/aws/observability-stack.yaml`** — a separate CloudFormation stack
+(`sdip-observability`), decoupled from either app instance's lifecycle:
 
 ```sh
-aws ssm start-session --target <instance-id> \
+aws cloudformation deploy \
+  --stack-name sdip-observability \
+  --template-file deploy/aws/observability-stack.yaml \
+  --capabilities CAPABILITY_IAM \
+  --tags Project=sdip Environment=shared
+```
+
+It defaults to this account's default VPC (app stacks each get their own,
+which is why they're at the account's 5-VPC limit — a third dedicated VPC
+just for this instance isn't worth it) and to the two app stacks' current
+Elastic IPs as the only CIDRs allowed to send it OTLP. Update
+`AppInstanceCidr1`/`AppInstanceCidr2` if either app stack is ever replaced
+(Elastic IPs otherwise survive that, so this is rare).
+
+Point each app instance at the stack's `ElasticIp` output, in its `.env`:
+
+```
+OTEL_EXPORTER_OTLP_ENDPOINT=http://<sdip-observability ElasticIp>:4318
+SDIP_ENVIRONMENT=dev          # or "production" on sdip-prod - don't skip this,
+                               # docker-compose.prod.yaml's own default is
+                               # "production" for BOTH if left unset
+```
+
+then `docker compose -f docker-compose.prod.yaml up -d` to restart the app
+container and pick it up. OTLP has no auth of its own — the security group
+rule restricting ingestion to exactly those two IPs is the only thing
+stopping anyone else on the internet from writing into your stack, so don't
+widen it.
+
+There is deliberately no GitHub Actions deploy wired up for this stack yet
+(unlike the app stacks) — update config by hand over Session Manager:
+
+```sh
+aws ssm start-session --target <sdip-observability InstanceId>
+cd /opt/sdip && git pull && docker compose -f observability/docker-compose.yaml up -d
+```
+
+Grafana, Prometheus, Tempo, and Loki all stay bound to the instance's
+loopback interface only (see below) — nothing opens a port for them, so the
+only way in is an SSM port-forward:
+
+```sh
+aws ssm start-session --target <sdip-observability InstanceId> \
   --document-name AWS-StartPortForwardingSession \
   --parameters '{"portNumber":["3030"],"localPortNumber":["3030"]}'
 ```

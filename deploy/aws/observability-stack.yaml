@@ -1,0 +1,333 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Shared observability stack (OpenTelemetry Collector, Prometheus, Loki,
+  Tempo, Grafana) on its own EC2 instance, decoupled from either app stack's
+  lifecycle. Both sdip and sdip-prod send traces/metrics here over the
+  network - see observability/README.md for the "one shared stack" rationale.
+  Nothing here is reachable from the public internet: OTLP ingestion is
+  restricted to the app instances' own IPs, and Grafana/Prometheus/Tempo/Loki
+  are reachable only through an SSM port-forward (see the GrafanaPortForward
+  output). There is no GitHub Actions deploy wired up yet, unlike the app
+  stacks - update config by hand over Session Manager (git pull; docker
+  compose -f observability/docker-compose.yaml up -d) until that's worth
+  building.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Network (reuses an existing VPC - accounts have a low VPC limit)
+        Parameters:
+          - VpcId
+          - SubnetId
+      - Label:
+          default: Who may send telemetry here
+        Parameters:
+          - AppInstanceCidr1
+          - AppInstanceCidr2
+      - Label:
+          default: Source
+        Parameters:
+          - RepoUrl
+          - RepoRef
+      - Label:
+          default: Instance
+        Parameters:
+          - InstanceType
+          - RootVolumeSize
+          - LatestAmiId
+      - Label:
+          default: Break-glass SSH (optional - Session Manager works without it)
+        Parameters:
+          - KeyName
+          - SshCidr
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-054faa4823c70d94b
+    Description: >-
+      Existing VPC to launch into. Defaults to this account's default VPC -
+      unlike the app stacks, this one does not create its own: EC2 VPC
+      limits are low (5 by default) and both app stacks already have one
+      each, so a third dedicated VPC just for this instance is wasteful.
+      Needs a subnet with auto-assign-public-IP on (SubnetId below).
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-0808c69036c6e7f38
+    Description: >-
+      Existing public subnet in VpcId (auto-assign public IP must be on).
+      Defaults to a public subnet of the default VPC above (eu-west-1c).
+
+  AppInstanceCidr1:
+    Type: String
+    Default: 34.246.5.105/32
+    Description: >-
+      First app instance allowed to send OTLP here, as a /32 - the sdip (dev)
+      stack's ElasticIp output by default. Elastic IPs survive instance
+      replacement, so this only needs updating if the app stack itself is
+      torn down and recreated.
+    AllowedPattern: ^([0-9]{1,3}\.){3}[0-9]{1,3}/32$
+    ConstraintDescription: must be a /32 CIDR
+
+  AppInstanceCidr2:
+    Type: String
+    Default: 54.220.141.82/32
+    Description: >-
+      Second app instance allowed to send OTLP here, as a /32 - the
+      sdip-prod stack's ElasticIp output by default.
+    AllowedPattern: ^([0-9]{1,3}\.){3}[0-9]{1,3}/32$
+    ConstraintDescription: must be a /32 CIDR
+
+  RepoUrl:
+    Type: String
+    Default: https://github.com/alexeygrigorev/interview-canvas-share.git
+    Description: >-
+      Git URL cloned on boot. Must be reachable without credentials - the
+      instance has none, so a private repo needs a deploy key added by hand.
+
+  RepoRef:
+    Type: String
+    Default: main
+    Description: Branch or tag to deploy.
+
+  InstanceType:
+    Type: String
+    Default: t4g.small
+    AllowedValues:
+      - t4g.small
+      - t4g.medium
+      - t4g.large
+    Description: >-
+      Graviton (arm64) types only, matching the default AMI. t4g.small (2GB)
+      covers five containers with room to spare - nothing here builds from
+      source, so it needs less headroom than either app instance.
+
+  RootVolumeSize:
+    Type: Number
+    Default: 20
+    MinValue: 12
+    Description: >-
+      Root EBS volume size in GiB. Holds the OS, the pulled images, and every
+      Prometheus/Loki/Tempo data volume - the only retention limits are
+      Tempo's 48h block retention and Prometheus's 15-day default; Loki has
+      none configured yet, so watch disk usage if log volume grows.
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Description: Resolved from the SSM public parameter, so stack updates track the current Amazon Linux 2023 AMI.
+
+  KeyName:
+    Type: String
+    Default: ""
+    Description: >-
+      EC2 key pair name for SSH. Leave empty to manage the box exclusively
+      through Session Manager, which needs no open port and no key.
+
+  SshCidr:
+    Type: String
+    Default: ""
+    Description: >-
+      CIDR allowed to reach port 22, e.g. 203.0.113.4/32. Leave empty to open
+      no SSH ingress at all. Do not set 0.0.0.0/0.
+    AllowedPattern: ^$|^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$
+    ConstraintDescription: must be empty or a valid IPv4 CIDR
+
+Conditions:
+  HasKeyName: !Not [!Equals [!Ref KeyName, ""]]
+  EnableSsh: !Not [!Equals [!Ref SshCidr, ""]]
+
+Resources:
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${AWS::StackName} OTLP ingestion from the app instances only
+      VpcId: !Ref VpcId
+      # No 80/443: nothing here is a web server for the public internet.
+      # Grafana/Prometheus/Tempo/Loki are reached through an SSM port-forward
+      # instead (see the GrafanaPortForward output) - they bind to the
+      # instance's loopback interface only, so no SG rule could expose them
+      # even by mistake.
+      SecurityGroupIngress:
+        - Description: OTLP/HTTP from app instance 1
+          IpProtocol: tcp
+          FromPort: 4318
+          ToPort: 4318
+          CidrIp: !Ref AppInstanceCidr1
+        - Description: OTLP/gRPC from app instance 1
+          IpProtocol: tcp
+          FromPort: 4317
+          ToPort: 4317
+          CidrIp: !Ref AppInstanceCidr1
+        - Description: OTLP/HTTP from app instance 2
+          IpProtocol: tcp
+          FromPort: 4318
+          ToPort: 4318
+          CidrIp: !Ref AppInstanceCidr2
+        - Description: OTLP/gRPC from app instance 2
+          IpProtocol: tcp
+          FromPort: 4317
+          ToPort: 4317
+          CidrIp: !Ref AppInstanceCidr2
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-sg
+
+  SshIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: EnableSsh
+    Properties:
+      GroupId: !Ref SecurityGroup
+      Description: SSH break-glass access
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp: !Ref SshCidr
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Grants shell access through Session Manager, so the stack needs no
+        # inbound SSH and no key pair - this is also how Grafana gets reached
+        # (see the GrafanaPortForward output), since nothing opens port 3030.
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  ElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-eip
+
+  # Associated separately so the address is allocated before the instance
+  # launches and survives stopping or replacing it - each app stack's
+  # OTEL_EXPORTER_OTLP_ENDPOINT keeps pointing at the same address.
+  ElasticIpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ElasticIp.AllocationId
+      InstanceId: !Ref Instance
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref AWS::NoValue]
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: !Ref RootVolumeSize
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          exec > >(tee -a /var/log/observability-bootstrap.log) 2>&1
+
+          echo "=== packages ==="
+          dnf install -y docker git
+
+          echo "=== docker compose cli plugin ==="
+          # Nothing here builds an image from source, so unlike the app
+          # stacks this needs no buildx - just compose, to run `docker
+          # compose up` against pre-built images.
+          case "$(uname -m)" in
+            aarch64) COMPOSE_ARCH=aarch64 ;;
+            x86_64)  COMPOSE_ARCH=x86_64 ;;
+            *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          install -d /usr/local/lib/docker/cli-plugins
+          curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${!COMPOSE_ARCH}" \
+            -o /usr/local/lib/docker/cli-plugins/docker-compose
+          chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose
+
+          systemctl enable --now docker
+          usermod -aG docker ec2-user
+
+          echo "=== source ==="
+          if [ ! -d /opt/sdip/.git ]; then
+            git clone --branch "${RepoRef}" "${RepoUrl}" /opt/sdip
+          fi
+          cd /opt/sdip
+
+          echo "=== environment ==="
+          # The admin password is generated here and never leaves the
+          # instance, same reasoning as the app stacks' secrets: it stays out
+          # of the template, the stack events, and the instance metadata.
+          if [ ! -f /opt/sdip/observability/.env ]; then
+            umask 077
+            echo "GRAFANA_ADMIN_PASSWORD=$(openssl rand -hex 16)" > /opt/sdip/observability/.env
+          fi
+
+          echo "=== network ==="
+          # observability/docker-compose.yaml normally joins an app stack's
+          # network as external (see its own header comment) so it can be
+          # co-located with an app instance. This instance runs no app, so
+          # there is nothing to join - create a private network of its own
+          # instead, just for these five containers to find each other by
+          # name on.
+          docker network inspect observability >/dev/null 2>&1 || docker network create observability
+
+          echo "=== start ==="
+          SDIP_NETWORK=observability docker compose -f observability/docker-compose.yaml up -d
+
+          echo "=== bootstrap complete ==="
+
+Outputs:
+  ElasticIp:
+    Description: >-
+      Set as OTEL_EXPORTER_OTLP_ENDPOINT=http://<this>:4318 in each app
+      stack's .env.
+    Value: !Ref ElasticIp
+
+  InstanceId:
+    Value: !Ref Instance
+
+  SessionManagerCommand:
+    Description: Open a shell on the instance without SSH.
+    Value: !Sub aws ssm start-session --target ${Instance}
+
+  GrafanaPortForward:
+    Description: >-
+      Run this, then open http://localhost:3030 - Grafana is not reachable
+      any other way.
+    Value: !Sub >-
+      aws ssm start-session --target ${Instance}
+      --document-name AWS-StartPortForwardingSession
+      --parameters '{"portNumber":["3030"],"localPortNumber":["3030"]}'
+
+  BootstrapLog:
+    Description: >-
+      Read this first if the stack does not come up - the CloudFormation
+      stack reports success as soon as the instance launches, not when the
+      containers are running. /var/log/cloud-init-output.log has the same
+      content plus cloud-init's own.
+    Value: /var/log/observability-bootstrap.log
