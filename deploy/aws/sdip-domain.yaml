@@ -1,0 +1,38 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  ACM certificate for the SDIP CloudFront distribution. CloudFront only
+  accepts certificates issued in us-east-1, regardless of which region the
+  distribution itself runs in, so this is deployed separately from
+  sdip-stack.yaml. Owning the certificate in its own stack also means
+  recreating the main stack never re-triggers DNS validation.
+
+Parameters:
+  DomainName:
+    Type: String
+    Description: Domain the certificate covers, e.g. interviews.example.com.
+
+  HostedZoneId:
+    Type: String
+    Description: Route53 hosted zone that owns DomainName, for DNS validation.
+
+Resources:
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+      Tags:
+        - {Key: Project, Value: sdip}
+        - {Key: ManagedBy, Value: cloudformation}
+
+Outputs:
+  CertificateArn:
+    Description: Set as CloudFrontCertificateArn when deploying sdip-stack.yaml.
+    Value: !Ref Certificate
+
+  DomainName:
+    Value: !Ref DomainName

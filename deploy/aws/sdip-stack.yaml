@@ -28,6 +28,12 @@ Metadata:
           - RootVolumeSize
           - LatestAmiId
       - Label:
+          default: CloudFront custom domain (optional - leave empty for the free *.cloudfront.net domain)
+        Parameters:
+          - CloudFrontDomainName
+          - CloudFrontCertificateArn
+          - CloudFrontHostedZoneId
+      - Label:
           default: Continuous deployment (optional - leave empty to deploy by hand)
         Parameters:
           - GitHubRepository
@@ -62,6 +68,35 @@ Parameters:
       its free *.cloudfront.net domain. Use this when you have no domain of your
       own. Port 80 is then reachable only from CloudFront, so the origin stops
       answering the public internet directly.
+
+  CloudFrontDomainName:
+    Type: String
+    Default: ""
+    Description: >-
+      Alternate domain name (CNAME) for the CloudFront distribution, e.g.
+      interviews.example.com. Requires an ACM certificate for this exact name
+      in us-east-1 (CloudFrontCertificateArn) - CloudFront only accepts
+      certificates from that region, regardless of where this stack itself is
+      deployed. Only used when EnableCloudFront is true; leave empty to serve
+      the free *.cloudfront.net domain instead.
+    AllowedPattern: ^$|^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$
+    ConstraintDescription: must be empty or a fully qualified domain name
+
+  CloudFrontCertificateArn:
+    Type: String
+    Default: ""
+    Description: >-
+      ACM certificate ARN covering CloudFrontDomainName, issued in us-east-1.
+      Required when CloudFrontDomainName is set. Deploy
+      deploy/aws/sdip-domain.yaml in us-east-1 first to get one.
+
+  CloudFrontHostedZoneId:
+    Type: String
+    Default: ""
+    Description: >-
+      Route53 hosted zone that owns CloudFrontDomainName. When set, the stack
+      creates the alias record for you; leave empty to point DNS at the
+      CloudFrontUrl output by hand instead.
 
   CloudFrontPrefixListId:
     Type: String
@@ -187,6 +222,12 @@ Conditions:
   HasDomain: !Not [!Equals [!Ref DomainName, ""]]
   UseCloudFront: !Equals [!Ref EnableCloudFront, "true"]
   DirectHttpAccess: !Not [!Equals [!Ref EnableCloudFront, "true"]]
+  UseCloudFrontDomain: !And
+    - !Condition UseCloudFront
+    - !Not [!Equals [!Ref CloudFrontDomainName, ""]]
+  CreateCloudFrontAliasRecord: !And
+    - !Condition UseCloudFrontDomain
+    - !Not [!Equals [!Ref CloudFrontHostedZoneId, ""]]
   # us-east-1 predates the regional naming scheme for EC2 public DNS names.
   IsUsEast1: !Equals [!Ref "AWS::Region", us-east-1]
   HasGitHubRepo: !Not [!Equals [!Ref GitHubRepository, ""]]
@@ -458,6 +499,7 @@ Resources:
       DistributionConfig:
         Enabled: true
         Comment: !Sub ${AWS::StackName} - System Design Interview Platform
+        Aliases: !If [UseCloudFrontDomain, [!Ref CloudFrontDomainName], !Ref AWS::NoValue]
         # PriceClass_100 is the cheapest tier: North America and Europe edges.
         PriceClass: PriceClass_100
         HttpVersion: http2and3
@@ -491,8 +533,26 @@ Resources:
           OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
           AllowedMethods: [DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT]
           CachedMethods: [GET, HEAD]
-        ViewerCertificate:
-          CloudFrontDefaultCertificate: true
+        ViewerCertificate: !If
+          - UseCloudFrontDomain
+          - AcmCertificateArn: !Ref CloudFrontCertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - CloudFrontDefaultCertificate: true
+
+  # Alias records share CloudFront's fixed hosted zone ID in every region -
+  # Z2FDTNDATAQYW2 is not specific to this account or distribution.
+  CloudFrontAliasRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: CreateCloudFrontAliasRecord
+    Properties:
+      HostedZoneId: !Ref CloudFrontHostedZoneId
+      Name: !Ref CloudFrontDomainName
+      Type: A
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt CloudFrontDistribution.DomainName
+        EvaluateTargetHealth: false
 
   Instance:
     Type: AWS::EC2::Instance
@@ -617,6 +677,13 @@ Outputs:
       HTTPS on CloudFront's own certificate, with no domain required. Takes a few
       minutes to become available after the distribution is created.
     Value: !Sub https://${CloudFrontDistribution.DomainName}
+
+  CloudFrontDomainUrl:
+    Condition: UseCloudFrontDomain
+    Description: >-
+      HTTPS on your own domain via CloudFront. Set as the SDIP_PUBLIC_URL
+      repository variable.
+    Value: !Sub https://${CloudFrontDomainName}
 
   InstanceId:
     Value: !Ref Instance

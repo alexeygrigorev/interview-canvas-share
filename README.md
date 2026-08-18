@@ -360,6 +360,49 @@ cookie and query string to the origin. That is deliberate: the app is fully
 dynamic and authenticated, and the `Upgrade` and `Sec-WebSocket-*` headers have
 to survive the trip or the realtime canvas silently stops syncing.
 
+### Your own domain on CloudFront
+
+Want CloudFront's HTTPS *and* a real hostname instead of `*.cloudfront.net`?
+CloudFront only accepts certificates from `us-east-1`, no matter which region
+the distribution or the rest of the stack live in, so the certificate is a
+separate stack in that region:
+
+```sh
+aws cloudformation deploy \
+  --region us-east-1 \
+  --template-file deploy/aws/sdip-domain.yaml \
+  --stack-name sdip-domain \
+  --parameter-overrides \
+      DomainName=interviews.example.com \
+      HostedZoneId=<your Route53 hosted zone ID>
+```
+
+`HostedZoneId` must be a Route53 zone in this account: CloudFormation creates
+the validation record and waits for ACM to issue the certificate, which
+usually takes a few minutes. Feed the `CertificateArn` output into the main
+stack alongside `EnableCloudFront=true`:
+
+```sh
+aws cloudformation deploy \
+  --template-file deploy/aws/sdip-stack.yaml \
+  --stack-name sdip \
+  --capabilities CAPABILITY_IAM \
+  --parameter-overrides \
+      DomainName= \
+      EnableCloudFront=true \
+      CloudFrontDomainName=interviews.example.com \
+      CloudFrontCertificateArn=<CertificateArn output above> \
+      CloudFrontHostedZoneId=<your Route53 hosted zone ID> \
+      TlsEmail=you@example.com \
+      RepoUrl=https://github.com/alexeygrigorev/interview-canvas-share.git
+```
+
+`CloudFrontHostedZoneId` is optional and only saves you a manual step: when
+set, the stack creates the alias A record for you. Leave it empty to point
+DNS at the `CloudFrontUrl` output by hand instead. Either way, set
+`SDIP_PUBLIC_URL` to the `CloudFrontDomainUrl` output so CI's post-deploy
+smoke test checks the right host.
+
 ### Changing the bootstrap replaces the instance
 
 Any edit to the template's `UserData` — including switching `DomainName` between
