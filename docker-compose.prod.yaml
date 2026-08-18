@@ -82,8 +82,11 @@ volumes:
   caddy_config:
 
 networks:
-  # Named explicitly (matching the sdip/sdip-prod stack-naming convention) so
-  # observability/docker-compose.yaml can join it as an external network and
-  # reach the app by service name.
+  # Named explicitly (rather than left to Compose's project-derived default)
+  # so observability/docker-compose.yaml can join it as an external network
+  # and reach the app by service name. This one file is shared by both the
+  # sdip and sdip-prod AWS stacks (and local `docker compose -f
+  # docker-compose.prod.yaml up`) — the name has to come from .env, not a
+  # literal here, or fixing one stack's network breaks the other's.
   default:
-    name: sdip-prod
+    name: ${SDIP_NETWORK_NAME:-sdip}

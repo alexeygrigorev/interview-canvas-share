@@ -758,6 +758,9 @@ Resources:
             echo "POSTGRES_PASSWORD=$(openssl rand -hex 32)" >> /opt/sdip/.env
             echo "SDIP_JWT_SECRET=$(openssl rand -hex 32)" >> /opt/sdip/.env
             echo "SDIP_ENVIRONMENT=${GitHubEnvironment}" >> /opt/sdip/.env
+            # sdip or sdip-prod - see docker-compose.prod.yaml's own comment
+            # on why this can't be a literal in that shared file.
+            echo "SDIP_NETWORK_NAME=${AWS::StackName}" >> /opt/sdip/.env
           fi
 
           echo "=== build and start ==="
