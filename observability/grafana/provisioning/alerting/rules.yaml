@@ -1,0 +1,51 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: sdip-data-loss
+    folder: SDIP Alerts
+    interval: 1m
+    rules:
+      - uid: sdip-canvas-components-deduped-spike
+        title: CanvasComponentsDedupedSpike
+        condition: threshold
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Canvas duplicate-create detection is dropping components
+          description: >-
+            sdip.canvas.components.deduped is rising, meaning
+            DatabaseStore._dedupe_duplicate_components is silently dropping
+            newly created canvas components as same-spot duplicates. A
+            dropped component looks identical to "nobody tried" in
+            sdip.canvas.elements.created, so this counter is the only
+            signal — see the "Data-loss watch" panel on the SDIP
+            Application Metrics dashboard.
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              expr: sum(rate(sdip_canvas_components_deduped_total[5m]))
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: threshold
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: threshold
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+        noDataState: OK
+        execErrState: Error

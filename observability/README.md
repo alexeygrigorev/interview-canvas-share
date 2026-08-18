@@ -98,6 +98,26 @@ then open http://localhost:3030 same as local dev.
 | Loki | http://localhost:3100 | Query API only; browse logs through Grafana. |
 | OTel Collector | localhost:4317 (gRPC) / localhost:4318 (HTTP) | What `OTEL_EXPORTER_OTLP_ENDPOINT` points at. Published to the host too, so a backend run outside Docker (`make run`) can reach it at `http://localhost:4318`. |
 
+## Alerting
+
+Grafana's unified alerting is file-provisioned from `grafana/provisioning/alerting/`:
+
+- **`CanvasComponentsDedupedSpike`** — fires when `sdip.canvas.components.deduped`
+  (see the backend README's "Telemetry" section) is above zero for 5
+  consecutive minutes. That counter should normally sit at zero; a sustained
+  rise means `DatabaseStore._dedupe_duplicate_components` is dropping
+  legitimate canvas components, not just retried duplicates — silent data
+  loss that the `sdip.canvas.elements.created` counter alone can't reveal,
+  since a dropped create looks identical to nobody having tried at all.
+
+Alerts route through the `sdip-alerts` contact point, a webhook whose URL
+comes from `SDIP_ALERT_WEBHOOK_URL` (set it in `.env`, alongside
+`GRAFANA_ADMIN_USER`/`GRAFANA_ADMIN_PASSWORD`). Left unset, it defaults to a
+placeholder that nothing listens on — rules still evaluate and show as
+firing in Grafana's Alerting UI (and via `/api/prometheus/grafana/api/v1/rules`),
+they just have nowhere to deliver to until you point it at a real Slack,
+Teams, or PagerDuty webhook.
+
 ## Notes
 
 - Everything here uses local, single-node storage (`docker volume`s) — there's

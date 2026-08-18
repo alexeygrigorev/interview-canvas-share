@@ -1,0 +1,6 @@
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: sdip-alerts
+    group_by: ["alertname", "deployment_environment"]

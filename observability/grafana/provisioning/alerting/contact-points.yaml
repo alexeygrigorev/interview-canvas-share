@@ -1,0 +1,15 @@
+apiVersion: 1
+
+# $SDIP_ALERT_WEBHOOK_URL is expanded from the Grafana container's own
+# environment at load time (see docker-compose.yaml) — nothing here reads
+# docker-compose's own variable substitution, since this file is bind-mounted
+# straight into the container rather than passed through the compose file.
+contactPoints:
+  - orgId: 1
+    name: sdip-alerts
+    receivers:
+      - uid: sdip-alerts-webhook
+        type: webhook
+        settings:
+          url: $SDIP_ALERT_WEBHOOK_URL
+        disableResolveMessage: false

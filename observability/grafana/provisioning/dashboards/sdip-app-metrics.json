@@ -195,6 +195,37 @@
         "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 10 } },
         "overrides": []
       }
+    },
+    {
+      "id": 9,
+      "type": "row",
+      "title": "Data-loss watch",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Components Deduped (should stay ~0)",
+      "description": "Rate of components dropped by same-spot duplicate-create detection (DatabaseStore._dedupe_duplicate_components). A sustained rise means the heuristic is eating legitimate elements, not just retries — see the CanvasComponentsDedupedSpike alert.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 19 },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (deployment_environment) (rate(sdip_canvas_components_deduped_total{deployment_environment=~\"$environment\"}[5m]))",
+          "legendFormat": "{{deployment_environment}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 10 },
+          "color": { "mode": "fixed", "fixedColor": "red" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }] }
+        },
+        "overrides": []
+      }
     }
   ]
 }

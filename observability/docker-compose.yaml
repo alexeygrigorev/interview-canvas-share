@@ -79,6 +79,11 @@ services:
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      # Read by provisioning/alerting/contact-points.yaml. Point it at a real
+      # Slack/Teams/PagerDuty webhook to actually get paged; left at the
+      # placeholder, alert rules still evaluate and show as firing in
+      # Grafana's Alerting UI, they just have nowhere to deliver to.
+      SDIP_ALERT_WEBHOOK_URL: ${SDIP_ALERT_WEBHOOK_URL:-http://localhost:9099/replace-with-a-real-webhook}
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana-data:/var/lib/grafana

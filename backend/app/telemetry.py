@@ -50,6 +50,16 @@ canvas_elements_created_counter = _meter.create_counter(
     description="Canvas elements added across all interview rooms.",
 )
 
+canvas_components_deduped_counter = _meter.create_counter(
+    "sdip.canvas.components.deduped",
+    unit="1",
+    description=(
+        "Components dropped by same-spot duplicate-create detection in "
+        "DatabaseStore.save_canvas. Should stay near zero — a sustained rise "
+        "means the heuristic is eating legitimate elements, not just retries."
+    ),
+)
+
 
 def _resource() -> Resource:
     environment = os.getenv("SDIP_ENVIRONMENT", "development")

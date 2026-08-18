@@ -44,7 +44,7 @@ from .models import (
     TokenInspection,
     User,
 )
-from .telemetry import canvas_elements_created_counter
+from .telemetry import canvas_components_deduped_counter, canvas_elements_created_counter
 
 GUEST_COOKIE_NAME = "sdip_guest_session"
 GUEST_SESSION_TTL = timedelta(hours=12)
@@ -99,6 +99,7 @@ def _dedupe_duplicate_components(
                 round(float(element.get("y", 0)) / _DEDUPE_GRID),
             )
             if key in seen:
+                canvas_components_deduped_counter.add(1)
                 continue
             seen.add(key)
         deduped.append(element)

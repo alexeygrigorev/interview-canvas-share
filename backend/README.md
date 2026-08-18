@@ -74,6 +74,7 @@ own the underlying state:
 | `sdip.sessions.created` | Counter | `POST /v1/sessions` (`routers/sessions.py`) |
 | `sdip.participants.active` | UpDownCounter | WebSocket connect/disconnect in `ConnectionManager` (`routers/realtime.py`) — the live count of realtime connections, not DB participant rows |
 | `sdip.canvas.elements.created` | Counter | `DatabaseStore.save_canvas` — canvas saves are full-snapshot replaces, so this is the net growth in element count per save, from either the REST or the realtime path |
+| `sdip.canvas.components.deduped` | Counter | `DatabaseStore._dedupe_duplicate_components`, called from `save_canvas` — components dropped as same-spot duplicates. Should stay near zero; a sustained rise means the heuristic is dropping legitimate elements |
 
 Grafana's provisioned "SDIP Application Metrics" dashboard (see
 `observability/README.md`) charts all three, both as running totals and over
