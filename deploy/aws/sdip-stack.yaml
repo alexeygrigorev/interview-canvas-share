@@ -40,6 +40,8 @@ Metadata:
           - GitHubEnvironment
           - GitHubSubjectPrefix
           - CreateGitHubOidcProvider
+          - EcrRepositoryName
+          - EcrRole
       - Label:
           default: Break-glass SSH (optional - Session Manager works without it)
         Parameters:
@@ -200,6 +202,29 @@ Parameters:
       it. Set false if this account already has one - the role then trusts the
       existing provider instead of failing with EntityAlreadyExists.
 
+  EcrRepositoryName:
+    Type: String
+    Default: ""
+    Description: >-
+      Name of the shared ECR repository from sdip-registry.yaml (deployed
+      once, outside this stack). Leave empty to keep the instance building
+      images from source on boot/deploy, as before. Set it to opt this
+      instance into pulling pre-built images instead - required for EcrRole
+      other than "none".
+
+  EcrRole:
+    Type: String
+    Default: none
+    AllowedValues: ["none", "push", "promote"]
+    Description: >-
+      What this stack's GitHubDeployRole may do against EcrRepositoryName.
+      "push" (dev) may build and push images and read tags. "promote"
+      (production) may only read tags with ecr:DescribeImages, to resolve
+      which build is currently tagged `dev` before promoting it - it can
+      never push. "none" grants nothing. The instance's own pull permissions
+      (GetAuthorizationToken/BatchGetImage/GetDownloadUrlForLayer) are
+      granted whenever EcrRepositoryName is set, independent of this value.
+
   KeyName:
     Type: String
     Default: ""
@@ -235,6 +260,9 @@ Conditions:
   CreateOidcProvider: !And
     - !Not [!Equals [!Ref GitHubRepository, ""]]
     - !Equals [!Ref CreateGitHubOidcProvider, "true"]
+  UseEcr: !Not [!Equals [!Ref EcrRepositoryName, ""]]
+  EcrRolePush: !And [!Condition HasGitHubRepo, !Equals [!Ref EcrRole, push]]
+  EcrRolePromote: !And [!Condition HasGitHubRepo, !Equals [!Ref EcrRole, promote]]
 
 Resources:
   Vpc:
@@ -363,6 +391,27 @@ Resources:
         # Grants shell access through Session Manager, so the stack needs no
         # inbound SSH and no key pair.
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - !If
+          - UseEcr
+          - PolicyName: pull-app-image
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                # No resource type exists for this action - every ECR pull
+                # starts with a registry-wide auth token, not a per-repo one.
+                - Sid: AuthenticateToTheRegistry
+                  Effect: Allow
+                  Action: ecr:GetAuthorizationToken
+                  Resource: "*"
+                - Sid: PullTheAppImage
+                  Effect: Allow
+                  Action:
+                    - ecr:BatchGetImage
+                    - ecr:GetDownloadUrlForLayer
+                    - ecr:BatchCheckLayerAvailability
+                  Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrRepositoryName}
+          - !Ref AWS::NoValue
 
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -386,7 +435,9 @@ Resources:
       UpdateMethod: NewVersion
       Content:
         schemaVersion: "2.2"
-        description: Roll the checkout in /opt/sdip forward to a commit and rebuild.
+        description: >-
+          Roll the checkout in /opt/sdip forward to a commit; pull and run
+          image_tag from ECR if given, otherwise build from source as before.
         parameters:
           commit:
             type: String
@@ -394,6 +445,13 @@ Resources:
             # SSM rejects a parameter that does not match, so the only value
             # the workflow injects into the script cannot carry shell syntax.
             allowedPattern: ^[0-9a-fA-F]{7,40}$
+          imageTag:
+            type: String
+            default: ""
+            description: >-
+              ECR tag to pull instead of building from source, e.g.
+              20260818-163457-83242da. Empty builds from source, as before.
+            allowedPattern: ^$|^[0-9]{8}-[0-9]{6}-[0-9a-fA-F]{7,40}$
         mainSteps:
           - action: aws:runShellScript
             name: deploy
@@ -404,7 +462,19 @@ Resources:
                 - cd /opt/sdip
                 - git fetch --all --tags --prune
                 - git checkout --detach '{{ commit }}'
-                - docker compose -f docker-compose.prod.yaml up -d --build
+                - !Sub |
+                    if [ -n '{{ imageTag }}' ]; then
+                      command -v aws >/dev/null || dnf install -y aws-cli
+                      registry="${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com"
+                      image="$registry/${EcrRepositoryName}:{{ imageTag }}"
+                      echo "pulling $image"
+                      aws ecr get-login-password --region ${AWS::Region} \
+                        | docker login --username AWS --password-stdin "$registry"
+                      IMAGE_URI="$image" docker compose -f docker-compose.prod.yaml pull app
+                      IMAGE_URI="$image" docker compose -f docker-compose.prod.yaml up -d
+                    else
+                      docker compose -f docker-compose.prod.yaml up -d --build
+                    fi
                 - docker image prune -f
 
   # Account-wide, so only one stack in the account may create it.
@@ -468,6 +538,41 @@ Resources:
                 Effect: Allow
                 Action: ssm:GetCommandInvocation
                 Resource: "*"
+        - !If
+          - EcrRolePush
+          - PolicyName: push-app-image
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Sid: AuthenticateToTheRegistry
+                  Effect: Allow
+                  Action: ecr:GetAuthorizationToken
+                  Resource: "*"
+                - Sid: PushTheAppImage
+                  Effect: Allow
+                  Action:
+                    - ecr:InitiateLayerUpload
+                    - ecr:UploadLayerPart
+                    - ecr:CompleteLayerUpload
+                    - ecr:PutImage
+                    - ecr:BatchCheckLayerAvailability
+                    - ecr:BatchGetImage
+                  Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrRepositoryName}
+          - !Ref AWS::NoValue
+        - !If
+          # Read-only: this is the whole mechanism that lets promote.yml find
+          # out what dev is currently running without any GitHub-side state.
+          # It can inspect tags; it can never push or change one.
+          - EcrRolePromote
+          - PolicyName: read-app-image-tags
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Sid: ResolveWhatDevIsCurrentlyRunning
+                  Effect: Allow
+                  Action: ecr:DescribeImages
+                  Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrRepositoryName}
+          - !Ref AWS::NoValue
 
   ElasticIp:
     Type: AWS::EC2::EIP

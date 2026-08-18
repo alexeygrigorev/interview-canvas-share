@@ -29,6 +29,11 @@ services:
     restart: unless-stopped
 
   app:
+    # Set by the deploy document to an ECR image reference when deploying a
+    # pre-built image; falls back to building from source in place when
+    # IMAGE_URI is unset, so `docker compose up --build` (local dev, CI, and
+    # a stack with no ECR configured) keeps working unchanged.
+    image: ${IMAGE_URI:-sdip-app-local}
     build: .
     environment:
       SDIP_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}

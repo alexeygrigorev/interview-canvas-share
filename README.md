@@ -722,36 +722,53 @@ entirely.
 Deploys are serial by design: the workflow's concurrency group does not cancel
 in-flight runs on `main`, so a half-finished rebuild is never interrupted.
 
+### Container images: build once in dev, promote the same image
+
+`deploy-dev` builds the app image on the runner (arm64, matching the t4g
+instances — no QEMU cross-build) and pushes it to a shared ECR repository
+(`deploy/aws/sdip-registry.yaml`, deployed once, independent of both compute
+stacks — deleting either environment can never take the registry down). Every
+build gets an immutable, sortable tag:
+
+```
+<YYYYMMDD>-<HHMMSS>-<short-sha>    e.g. 20260818-163457-83242da
+```
+
+alongside a moving `dev` tag pointing at whichever image is currently running
+in dev. The dev instance then pulls that exact tag — it never builds from
+source once `EcrRole=push`/`promote` is configured (see below); a stack with
+`EcrRepositoryName` left empty still builds in place on the box, unchanged
+from before ECR existed.
+
 ### Promote to production
 
 There is no automatic path to production — `deploy-dev` only ever touches
 `sdip`. Shipping to `sdip-prod` is the separate
 `.github/workflows/promote.yml` workflow, triggered by hand from the Actions
-tab (`workflow_dispatch`, no other trigger). It does not build anything new:
-it reads `SDIP_DEV_DEPLOYED_SHA` — the commit `deploy-dev` last confirmed
-healthy on dev — and runs the exact same SSM deploy document against the
-`sdip-prod` instance, so what ships to production is always a build that
-already ran on dev, never an untested commit.
+tab (`workflow_dispatch`, no other trigger):
 
 ```sh
 gh workflow run promote.yml
 gh run watch    # or follow it in the Actions tab
 ```
 
-`SDIP_DEV_DEPLOYED_SHA` is a plain repository variable, written by the last
-step of `deploy-dev` only after its own smoke test passes — so a dev deploy
-that never came up healthy is never eligible for promotion. Set it by hand if
-you ever need to promote a specific commit outside that flow:
-
-```sh
-gh variable set SDIP_DEV_DEPLOYED_SHA --body <commit-sha>
-```
+It builds nothing new. It reads ECR directly — `aws ecr describe-images` on
+the `dev` tag — to find the dated version tag sharing that same image, then
+sends that exact commit + image tag to the `sdip-prod` instance through the
+same SSM deploy document dev uses, which pulls and runs that already-built
+image. What ships to production is always a build that already ran on dev,
+resolved from the registry at promote time — not a value some earlier CI run
+wrote down, so it can never point at a deploy that failed its own smoke test
+partway through, or drift from what dev is actually running right now.
 
 The `promote` job declares `environment: production`, so it authenticates as
 `sdip-prod`'s own `GitHubDeployRole` — a separate role from `sdip`'s, trusting
-only the `production` OIDC subject, scoped to only the `sdip-prod-deploy`
-document and the `sdip-prod` instance. It cannot touch dev, and `deploy-dev`'s
-role cannot touch production.
+only the `production` OIDC subject. It can read ECR tags
+(`ecr:DescribeImages`, `EcrRole=promote`) and run only the
+`sdip-prod-deploy` document against only the `sdip-prod` instance — it has no
+ECR push permission, so production can promote an image but never publish
+one. `deploy-dev`'s role is the mirror image: it can push to ECR
+(`EcrRole=push`) and deploy only to `sdip`; it cannot touch production.
 
 Want an explicit approval click in front of the run, on top of it already
 being manual? Add required reviewers to the `production` environment in the

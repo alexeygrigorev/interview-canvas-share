@@ -14,46 +14,68 @@ concurrency:
 
 jobs:
   promote:
-    name: Deploy dev's current commit to production
+    name: Deploy dev's current image to production
     runs-on: ubuntu-latest
     environment: production
     permissions:
       id-token: write # for the OIDC token exchanged for the AWS role
       contents: read
     steps:
-      - name: Look up the commit currently running in dev
-        id: commit
-        run: |
-          set -euo pipefail
-          sha="${{ vars.SDIP_DEV_DEPLOYED_SHA }}"
-          if [ -z "$sha" ]; then
-            echo "SDIP_DEV_DEPLOYED_SHA is not set - dev has not completed a deploy yet" >&2
-            exit 1
-          fi
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "Promoting $sha (currently running in dev) to production"
-
       - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      # Same SSM document mechanism as the dev deploy: this role may run only
-      # the production stack's <stack>-deploy document against its own
-      # instance, so promoting still can't do anything but check out this one
-      # commit and rebuild - see README "Continuous deployment".
-      - name: Roll production forward to ${{ steps.commit.outputs.sha }}
+      # `dev` is the moving tag deploy-dev leaves on whatever image it last
+      # pushed - production never builds, it only ever promotes a build dev
+      # already ran. The dated tag sharing that same image is where the
+      # commit sha comes from. No GitHub-side state involved, so this is
+      # always exactly what dev is running right now, not what CI last
+      # thought it deployed.
+      - name: Resolve what dev is currently running
+        id: dev
+        run: |
+          set -euo pipefail
+          tags=$(aws ecr describe-images \
+            --repository-name "${{ vars.SDIP_ECR_REPOSITORY }}" \
+            --image-ids imageTag=dev \
+            --query 'imageDetails[0].imageTags' --output text)
+
+          image_tag=""
+          for t in $tags; do
+            if [[ "$t" =~ ^[0-9]{8}-[0-9]{6}-[0-9a-f]{7,40}$ ]]; then
+              image_tag="$t"
+              break
+            fi
+          done
+          if [ -z "$image_tag" ]; then
+            echo "no dated version tag alongside 'dev' - has dev deployed at least once?" >&2
+            exit 1
+          fi
+
+          commit="${image_tag##*-}"
+          echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "Promoting $image_tag (commit $commit, currently running in dev) to production"
+
+      # Same SSM document mechanism as dev: this role may run only the
+      # production stack's <stack>-deploy document against its own instance,
+      # so promoting still can't do anything but check out this one commit
+      # and pull this one image - see README "Continuous deployment". This
+      # role has no ECR push permission at all; production only ever pulls.
+      - name: Roll production forward to ${{ steps.dev.outputs.image_tag }}
         env:
           INSTANCE_ID: ${{ vars.SDIP_INSTANCE_ID }}
-          COMMIT: ${{ steps.commit.outputs.sha }}
+          COMMIT: ${{ steps.dev.outputs.commit }}
+          IMAGE_TAG: ${{ steps.dev.outputs.image_tag }}
         run: |
           set -euo pipefail
           command_id=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name "${{ vars.SDIP_DEPLOY_DOCUMENT }}" \
-            --comment "Promote ${COMMIT:0:7} from dev" \
+            --comment "Promote $IMAGE_TAG from dev" \
             --timeout-seconds 1800 \
-            --parameters "commit=$COMMIT" \
+            --parameters "{\"commit\":[\"$COMMIT\"],\"imageTag\":[\"$IMAGE_TAG\"]}" \
             --query Command.CommandId --output text)
           echo "SSM command: $command_id"
 

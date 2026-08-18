@@ -1,0 +1,66 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Shared ECR repository for the SDIP app image. Deployed once, independent of
+  both the dev (sdip) and production (sdip-prod) stacks: it is the one thing
+  they share on purpose, since promoting dev to production only means telling
+  production to pull an image dev already built and pushed here. Deleting
+  either compute stack must never delete this.
+
+Parameters:
+  RepositoryName:
+    Type: String
+    Default: sdip
+    Description: >-
+      Referenced by name (not ARN) from sdip-stack.yaml's EcrRepositoryName
+      parameter - keep the two in sync.
+
+Resources:
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref RepositoryName
+      ImageTagMutability: MUTABLE
+      # Version tags (YYYYMMDD-HHMMSS-<sha>) are pushed once and never
+      # retagged - only the moving `dev` and `prod` pointer tags get
+      # reassigned. Mutability has to stay on at the repository level for
+      # those pointer tags to work at all.
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep the most recent 30 version-tagged builds; the dev/prod pointer tags always live on one of the newest images, so they are never the ones expired.",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["20"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 30
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Untagged images are build leftovers - nothing references them.",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 1
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - {Key: Project, Value: sdip}
+
+Outputs:
+  RepositoryUri:
+    Value: !GetAtt Repository.RepositoryUri
+
+  RepositoryArn:
+    Value: !GetAtt Repository.Arn
+
+  RepositoryName:
+    Value: !Ref Repository

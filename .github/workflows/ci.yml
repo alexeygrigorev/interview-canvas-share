@@ -155,34 +155,58 @@ jobs:
       github.event_name == 'push'
       && github.ref == 'refs/heads/main'
       && vars.SDIP_INSTANCE_ID != ''
-    runs-on: ubuntu-latest
+    # arm64, matching the t4g (Graviton) instances - a native build here, no
+    # QEMU cross-build, and the image runs on exactly the CPU it was built on.
+    runs-on: ubuntu-24.04-arm
     environment: dev
     permissions:
       id-token: write # for the OIDC token exchanged for the AWS role
       contents: read
-      actions: write # to record the deployed commit in SDIP_DEV_DEPLOYED_SHA
     steps:
+      - uses: actions/checkout@v7
+
       - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # `dev` is a moving pointer to whatever image is currently running in
+      # dev - promote.yml reads it to find out what to ship to production,
+      # so it needs no GitHub-side state of its own. The dated tag is the
+      # immutable, auditable record of every build.
+      - name: Build and push the app image
+        id: image
+        env:
+          REPOSITORY: ${{ steps.ecr.outputs.registry }}/${{ vars.SDIP_ECR_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          tag="$(date -u +%Y%m%d-%H%M%S)-${GITHUB_SHA::7}"
+          docker build -t "$REPOSITORY:$tag" -t "$REPOSITORY:dev" .
+          docker push "$REPOSITORY:$tag"
+          docker push "$REPOSITORY:dev"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       # The steps themselves live in the SSM document the CloudFormation stack
       # defines, not here: this role may run that one document against that one
       # instance and nothing else, so it never holds shell access. The commit
-      # SHA is the only input, and the document's allowedPattern rejects
-      # anything that is not one.
+      # SHA and image tag are the only inputs, and the document's
+      # allowedPattern rejects anything that is not well-formed.
       - name: Roll the instance forward to ${{ github.sha }}
         env:
           INSTANCE_ID: ${{ vars.SDIP_INSTANCE_ID }}
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
         run: |
           set -euo pipefail
           command_id=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name "${{ vars.SDIP_DEPLOY_DOCUMENT }}" \
-            --comment "Deploy ${GITHUB_SHA::7}" \
+            --comment "Deploy ${GITHUB_SHA::7} ($IMAGE_TAG)" \
             --timeout-seconds 1800 \
-            --parameters "commit=$GITHUB_SHA" \
+            --parameters "{\"commit\":[\"$GITHUB_SHA\"],\"imageTag\":[\"$IMAGE_TAG\"]}" \
             --query Command.CommandId --output text)
           echo "SSM command: $command_id"
 
@@ -213,14 +237,3 @@ jobs:
           done
           echo "the deployment did not report healthy" >&2
           exit 1
-
-      # promote.yml reads this to deploy "whatever is currently running in
-      # dev" to production, so it only updates once the app above is
-      # confirmed healthy - never on a deploy that never came up.
-      - name: Record the deployed commit for promotion
-        run: gh variable set SDIP_DEV_DEPLOYED_SHA --body "$GITHUB_SHA"
-        env:
-          GH_TOKEN: ${{ github.token }}
-          # gh infers owner/repo from a git checkout, which this job never
-          # does - point it at the repo explicitly instead.
-          GH_REPO: ${{ github.repository }}
