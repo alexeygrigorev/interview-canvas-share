@@ -471,9 +471,9 @@ Resources:
                       aws ecr get-login-password --region ${AWS::Region} \
                         | docker login --username AWS --password-stdin "$registry"
                       IMAGE_URI="$image" docker compose -f docker-compose.prod.yaml pull app
-                      IMAGE_URI="$image" docker compose -f docker-compose.prod.yaml up -d
+                      IMAGE_URI="$image" SDIP_GIT_COMMIT='{{ commit }}' docker compose -f docker-compose.prod.yaml up -d
                     else
-                      docker compose -f docker-compose.prod.yaml up -d --build
+                      SDIP_GIT_COMMIT='{{ commit }}' docker compose -f docker-compose.prod.yaml up -d --build
                     fi
                 - docker image prune -f
 
@@ -757,12 +757,16 @@ Resources:
             echo "SDIP_TLS_EMAIL=${TlsEmail}" >> /opt/sdip/.env
             echo "POSTGRES_PASSWORD=$(openssl rand -hex 32)" >> /opt/sdip/.env
             echo "SDIP_JWT_SECRET=$(openssl rand -hex 32)" >> /opt/sdip/.env
+            echo "SDIP_ENVIRONMENT=${GitHubEnvironment}" >> /opt/sdip/.env
           fi
 
           echo "=== build and start ==="
           # Containers carry restart: unless-stopped and docker is enabled, so
-          # the stack comes back on its own after a reboot.
-          docker compose -f docker-compose.prod.yaml up -d --build
+          # the stack comes back on its own after a reboot. Every later deploy
+          # (DeployDocument, below) overwrites SDIP_GIT_COMMIT with the commit
+          # it actually checked out; this first boot has no deploy behind it
+          # yet, so it is the checkout HEAD lands on straight from the clone.
+          SDIP_GIT_COMMIT="$(git rev-parse HEAD)" docker compose -f docker-compose.prod.yaml up -d --build
 
           echo "=== bootstrap complete ==="
 
