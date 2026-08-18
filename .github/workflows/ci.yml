@@ -146,8 +146,8 @@ jobs:
         if: always()
         run: docker compose down -v
 
-  deploy:
-    name: Deploy to production
+  deploy-dev:
+    name: Deploy to dev
     needs: [stack]
     # Skipped entirely until the deployment variables are configured - see
     # "Continuous deployment" in README.md.
@@ -156,10 +156,11 @@ jobs:
       && github.ref == 'refs/heads/main'
       && vars.SDIP_INSTANCE_ID != ''
     runs-on: ubuntu-latest
-    environment: production
+    environment: dev
     permissions:
       id-token: write # for the OIDC token exchanged for the AWS role
       contents: read
+      actions: write # to record the deployed commit in SDIP_DEV_DEPLOYED_SHA
     steps:
       - uses: aws-actions/configure-aws-credentials@v6
         with:
@@ -212,3 +213,11 @@ jobs:
           done
           echo "the deployment did not report healthy" >&2
           exit 1
+
+      # promote.yml reads this to deploy "whatever is currently running in
+      # dev" to production, so it only updates once the app above is
+      # confirmed healthy - never on a deploy that never came up.
+      - name: Record the deployed commit for promotion
+        run: gh variable set SDIP_DEV_DEPLOYED_SHA --body "$GITHUB_SHA"
+        env:
+          GH_TOKEN: ${{ github.token }}

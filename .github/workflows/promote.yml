@@ -1,0 +1,86 @@
+name: Promote dev to production
+
+# Deliberately workflow_dispatch only - there is no automatic path to
+# production. A human decides when dev is good enough to ship, and triggers
+# this by hand from the Actions tab.
+on:
+  workflow_dispatch:
+
+# Never run two promotions at once, and never cancel one partway through a
+# live rollout on the production instance.
+concurrency:
+  group: promote-production
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Deploy dev's current commit to production
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write # for the OIDC token exchanged for the AWS role
+      contents: read
+    steps:
+      - name: Look up the commit currently running in dev
+        id: commit
+        run: |
+          set -euo pipefail
+          sha="${{ vars.SDIP_DEV_DEPLOYED_SHA }}"
+          if [ -z "$sha" ]; then
+            echo "SDIP_DEV_DEPLOYED_SHA is not set - dev has not completed a deploy yet" >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Promoting $sha (currently running in dev) to production"
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # Same SSM document mechanism as the dev deploy: this role may run only
+      # the production stack's <stack>-deploy document against its own
+      # instance, so promoting still can't do anything but check out this one
+      # commit and rebuild - see README "Continuous deployment".
+      - name: Roll production forward to ${{ steps.commit.outputs.sha }}
+        env:
+          INSTANCE_ID: ${{ vars.SDIP_INSTANCE_ID }}
+          COMMIT: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          command_id=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "${{ vars.SDIP_DEPLOY_DOCUMENT }}" \
+            --comment "Promote ${COMMIT:0:7} from dev" \
+            --timeout-seconds 1800 \
+            --parameters "commit=$COMMIT" \
+            --query Command.CommandId --output text)
+          echo "SSM command: $command_id"
+
+          status=0
+          aws ssm wait command-executed \
+            --command-id "$command_id" --instance-id "$INSTANCE_ID" || status=$?
+
+          aws ssm get-command-invocation \
+            --command-id "$command_id" --instance-id "$INSTANCE_ID" \
+            --query StandardOutputContent --output text
+          if [ "$status" -ne 0 ]; then
+            aws ssm get-command-invocation \
+              --command-id "$command_id" --instance-id "$INSTANCE_ID" \
+              --query StandardErrorContent --output text >&2
+            exit 1
+          fi
+
+      - name: Smoke-test the deployment
+        if: vars.SDIP_PUBLIC_URL != ''
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if curl -fsS --max-time 10 "${{ vars.SDIP_PUBLIC_URL }}/health" | grep -q '"ok"'; then
+              echo "healthy after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "the deployment did not report healthy" >&2
+          exit 1

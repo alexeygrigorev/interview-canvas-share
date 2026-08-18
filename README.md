@@ -205,6 +205,58 @@ connections in process memory, so a second replica would put participants of the
 same interview into separate rooms — their edits would reach the database but
 never each other. See *Scaling past one instance* below.
 
+### Environments: dev and production
+
+Two independent copies of everything below are deployed — same template, two
+`--stack-name`s, each with its own VPC, EC2 instance, PostgreSQL volume, and
+CloudFront distribution:
+
+| Environment | Stack name | Domain | GitHub environment | Deploys |
+| --- | --- | --- | --- | --- |
+| dev | `sdip` | https://dev.interviews.aisl.click | `dev` | automatic — every push to `main` (see "Continuous deployment") |
+| production | `sdip-prod` | https://interviews.aisl.click | `production` | manual only — a human runs "Promote dev to production" from the Actions tab (see "Promote to production" below). There is no automatic path to production. |
+
+They share nothing but the `aisl.click` Route53 hosted zone (each owns its own
+record) and the account's GitHub OIDC provider (only one stack sets
+`CreateGitHubOidcProvider=true`; the other passes `false` and reuses it).
+Compute, database, and CloudFront are fully separate per stack, so redeploying,
+resizing, or deleting one cannot touch the other.
+
+There is intentionally no parent/nested stack joining the two: the reason for a
+second copy is that each can be changed or torn down independently, and a
+nested stack would only add coupling neither needs. What keeps it legible
+instead:
+
+- **Naming is the source of truth** — `sdip` is always dev, `sdip-prod` is
+  always production. Never repurpose one of these names for the other.
+- **Stack tags** — every resource in each stack carries `Environment` (`dev` /
+  `production`) and `Project=sdip`, set with `--tags` on
+  `aws cloudformation deploy`. Visible in the CloudFormation and Cost Explorer
+  consoles without opening either template.
+- **Separate GitHub deploy roles per stack** — each stack's `GitHubEnvironment`
+  parameter matches its own name (`dev` / `production`), so each has its own
+  `GitHubDeployRole` trusting only its own environment's OIDC subject. The two
+  are not interchangeable: a token minted for the `dev` environment cannot
+  assume the production role, and vice versa.
+- **This table** — update it whenever a stack's domain, deploy status, or name
+  changes.
+
+`GitHubDeployRole` variables live at the GitHub *environment* level, not the
+repository level, so `deploy-dev` and `promote` each pick up their own
+stack's role/instance/document/URL automatically from the `environment:` they
+declare (`AWS_REGION` is the one exception — same region for both, so it stays
+a repository variable). `dev`'s environment-scoped variables are the
+repository-level ones already set (see "Continuous deployment"); `production`
+has its own, set once with the `sdip-prod` stack's own
+`GitHubVariablesCommand` output, `--env production`.
+
+Look up either stack's current parameters and outputs any time:
+
+```sh
+aws cloudformation describe-stacks --stack-name sdip      --query 'Stacks[0].Outputs' --output table   # dev
+aws cloudformation describe-stacks --stack-name sdip-prod --query 'Stacks[0].Outputs' --output table   # production
+```
+
 ### What you need first
 
 - A domain you can add an A record to.
@@ -595,9 +647,13 @@ is red.
 
 ### Continuous deployment
 
-The deploy job is skipped unless the repository has `SDIP_INSTANCE_ID` set, so
-the pipeline is CI-only until you configure it. It reproduces "Ship a new
-version" above without SSH: GitHub authenticates to AWS with OIDC and asks
+This section describes the mechanism once per stack; both `sdip` (dev) and
+`sdip-prod` (production) use it identically, just with different
+`GitHubEnvironment`/instance/document values — see "Environments" above.
+
+The `deploy-dev` job is skipped unless the repository has `SDIP_INSTANCE_ID`
+set, so the pipeline is CI-only until you configure it. It reproduces "Ship a
+new version" above without SSH: GitHub authenticates to AWS with OIDC and asks
 Systems Manager to run the stack's deploy document on the instance.
 
 There are no long-lived AWS keys anywhere. GitHub mints a short-lived OIDC
@@ -654,13 +710,50 @@ repository. Changing *what* a deploy does means changing the template, which is
 reviewed and versioned like the rest of the infrastructure.
 
 The trust policy pins the token's subject to
-`repo:<owner>/<repo>:environment:production`. That claim is the environment
-form — **not** `ref:refs/heads/main` — because the job declares an
-`environment:`. Using the ref form is the usual cause of "Not authorized to
-perform sts:AssumeRoleWithWebIdentity" on a first deploy. Pinning the
-environment also means a fork's pull request cannot assume the role: forks
-cannot reach a protected environment, and the audience check keeps unrelated
-workflows out entirely.
+`repo:<owner>/<repo>:environment:<GitHubEnvironment>` — `dev` for `sdip`,
+`production` for `sdip-prod`. That claim is the environment form — **not**
+`ref:refs/heads/main` — because the job declares an `environment:`. Using the
+ref form is the usual cause of "Not authorized to perform
+sts:AssumeRoleWithWebIdentity" on a first deploy. Pinning the environment also
+means a fork's pull request cannot assume either role: forks cannot reach a
+protected environment, and the audience check keeps unrelated workflows out
+entirely.
 
 Deploys are serial by design: the workflow's concurrency group does not cancel
 in-flight runs on `main`, so a half-finished rebuild is never interrupted.
+
+### Promote to production
+
+There is no automatic path to production — `deploy-dev` only ever touches
+`sdip`. Shipping to `sdip-prod` is the separate
+`.github/workflows/promote.yml` workflow, triggered by hand from the Actions
+tab (`workflow_dispatch`, no other trigger). It does not build anything new:
+it reads `SDIP_DEV_DEPLOYED_SHA` — the commit `deploy-dev` last confirmed
+healthy on dev — and runs the exact same SSM deploy document against the
+`sdip-prod` instance, so what ships to production is always a build that
+already ran on dev, never an untested commit.
+
+```sh
+gh workflow run promote.yml
+gh run watch    # or follow it in the Actions tab
+```
+
+`SDIP_DEV_DEPLOYED_SHA` is a plain repository variable, written by the last
+step of `deploy-dev` only after its own smoke test passes — so a dev deploy
+that never came up healthy is never eligible for promotion. Set it by hand if
+you ever need to promote a specific commit outside that flow:
+
+```sh
+gh variable set SDIP_DEV_DEPLOYED_SHA --body <commit-sha>
+```
+
+The `promote` job declares `environment: production`, so it authenticates as
+`sdip-prod`'s own `GitHubDeployRole` — a separate role from `sdip`'s, trusting
+only the `production` OIDC subject, scoped to only the `sdip-prod-deploy`
+document and the `sdip-prod` instance. It cannot touch dev, and `deploy-dev`'s
+role cannot touch production.
+
+Want an explicit approval click in front of the run, on top of it already
+being manual? Add required reviewers to the `production` environment in the
+repository's Settings → Environments — `promote` will then pause for sign-off
+before it runs.
