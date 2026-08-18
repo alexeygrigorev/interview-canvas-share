@@ -39,6 +39,16 @@ services:
       SDIP_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       SDIP_JWT_SECRET: ${SDIP_JWT_SECRET:?set SDIP_JWT_SECRET in .env}
       SDIP_CORS_ORIGINS: https://${SDIP_DOMAIN:?set SDIP_DOMAIN in .env}
+      # Soft-defaulted, not required: existing .env files on already-deployed
+      # instances predate these and should keep deploying unchanged.
+      SDIP_ENVIRONMENT: ${SDIP_ENVIRONMENT:-production}
+      # Set by the deploy document to the commit it just checked out.
+      SDIP_GIT_COMMIT: ${SDIP_GIT_COMMIT:-unknown}
+      # Unset by default, so the app never attempts OTLP export without a
+      # backend to send it to. Set these in .env to turn on tracing and
+      # metrics — there is no collector in front of this stack.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
     expose:
       - "8000"
     depends_on:
@@ -70,3 +80,10 @@ volumes:
   pgdata:
   caddy_data:
   caddy_config:
+
+networks:
+  # Named explicitly (matching the sdip/sdip-prod stack-naming convention) so
+  # observability/docker-compose.yaml can join it as an external network and
+  # reach the app by service name.
+  default:
+    name: sdip-prod

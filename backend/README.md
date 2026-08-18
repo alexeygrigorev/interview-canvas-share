@@ -54,3 +54,27 @@ SDIP_TEST_DATABASE_URL=postgresql://sdip:sdip@localhost:5432/sdip make test
 ```
 
 Set `SDIP_JWT_SECRET` before deploying outside local development.
+
+## Telemetry
+
+The app instruments FastAPI and its SQLAlchemy engine with OpenTelemetry,
+exporting traces and metrics as OTLP. It only activates when
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set — unset (the default, including in this
+test suite), it's a no-op with no network calls. `SDIP_ENVIRONMENT` and
+`SDIP_GIT_COMMIT` are reported as the `deployment.environment` and
+`service.version` resource attributes; see the root README's "Telemetry"
+section for details.
+
+On top of the automatic FastAPI/SQLAlchemy instrumentation, `app/telemetry.py`
+defines three application metrics, updated from the routers and store that
+own the underlying state:
+
+| Metric | Kind | Where it's recorded |
+| --- | --- | --- |
+| `sdip.sessions.created` | Counter | `POST /v1/sessions` (`routers/sessions.py`) |
+| `sdip.participants.active` | UpDownCounter | WebSocket connect/disconnect in `ConnectionManager` (`routers/realtime.py`) — the live count of realtime connections, not DB participant rows |
+| `sdip.canvas.elements.created` | Counter | `DatabaseStore.save_canvas` — canvas saves are full-snapshot replaces, so this is the net growth in element count per save, from either the REST or the realtime path |
+
+Grafana's provisioned "SDIP Application Metrics" dashboard (see
+`observability/README.md`) charts all three, both as running totals and over
+time.

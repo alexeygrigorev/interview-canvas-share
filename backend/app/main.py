@@ -17,6 +17,7 @@ from .errors import ApiException
 from .models import ApiError
 from .routers import auth, canvas, guest, me, participants, realtime, review, sessions
 from .store import DatabaseStore
+from .telemetry import instrument_app
 
 
 def _validation_message(exc: RequestValidationError) -> str:
@@ -41,6 +42,7 @@ def create_app(
         ),
     )
     application.state.store = store or DatabaseStore.seeded(url=None)
+    instrument_app(application, application.state.store.engine)
 
     origins = [
         origin.strip()

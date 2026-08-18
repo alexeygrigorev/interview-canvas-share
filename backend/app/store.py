@@ -44,6 +44,7 @@ from .models import (
     TokenInspection,
     User,
 )
+from .telemetry import canvas_elements_created_counter
 
 GUEST_COOKIE_NAME = "sdip_guest_session"
 GUEST_SESSION_TTL = timedelta(hours=12)
@@ -1098,12 +1099,18 @@ class DatabaseStore:
             if canvas is None or session is None:
                 return None
             now = utcnow()
+            previous_count = len(canvas.elements)
             canvas.elements = [
                 element.model_dump(mode="json", by_alias=True)
                 if hasattr(element, "model_dump")
                 else element
                 for element in elements
             ]  # type: ignore[union-attr,misc]
+            # A save is a full snapshot, not an incremental edit, so growth in
+            # element count is the closest thing to a "created" event.
+            added = len(canvas.elements) - previous_count
+            if added > 0:
+                canvas_elements_created_counter.add(added)
             canvas.updated_at = now
             session.updated_at = now
             self._record_audit(database, session_id, "canvas.saved", actor, now)

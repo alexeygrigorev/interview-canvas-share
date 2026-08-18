@@ -18,6 +18,7 @@ from ..models import (
     SessionEndedMessage,
 )
 from ..store import DatabaseStore, get_store
+from ..telemetry import active_participants_counter
 
 router = APIRouter(tags=["Realtime"])
 room_message_adapter = TypeAdapter(RoomMessage)
@@ -30,14 +31,16 @@ class ConnectionManager:
     async def connect(self, session_id: str, websocket: WebSocket, subprotocol: str | None = None) -> None:
         await websocket.accept(subprotocol=subprotocol)
         self.connections[session_id].add(websocket)
+        active_participants_counter.add(1)
 
     def disconnect(self, session_id: str, websocket: WebSocket) -> None:
         connections = self.connections.get(session_id)
-        if connections is None:
+        if connections is None or websocket not in connections:
             return
         connections.discard(websocket)
         if not connections:
             self.connections.pop(session_id, None)
+        active_participants_counter.add(-1)
 
     async def broadcast(self, session_id: str, message: dict[str, object]) -> None:
         stale: list[WebSocket] = []

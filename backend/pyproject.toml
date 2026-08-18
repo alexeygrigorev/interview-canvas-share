@@ -12,6 +12,10 @@ dependencies = [
     "uvicorn[standard]>=0.35.0",
     "sqlalchemy>=2.0.51",
     "psycopg[binary]>=3.2",
+    "opentelemetry-sdk>=1.44.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.44.0",
+    "opentelemetry-instrumentation-fastapi>=0.65b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.65b0",
 ]
 
 [dependency-groups]

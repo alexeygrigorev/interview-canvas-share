@@ -25,6 +25,12 @@ services:
     environment:
       SDIP_DATABASE_URL: postgresql://${POSTGRES_USER:-sdip}:${POSTGRES_PASSWORD:-sdip}@postgres:5432/${POSTGRES_DB:-sdip}
       SDIP_JWT_SECRET: ${SDIP_JWT_SECRET:-local-development-secret-change-me}
+      SDIP_ENVIRONMENT: ${SDIP_ENVIRONMENT:-development}
+      SDIP_GIT_COMMIT: ${SDIP_GIT_COMMIT:-unknown}
+      # Unset by default, so the app never attempts OTLP export without a
+      # backend to send it to. Set these to turn on tracing and metrics.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
     ports:
       - "${APP_PORT:-8100}:8000"
     depends_on:
@@ -34,3 +40,10 @@ services:
 
 volumes:
   pgdata:
+
+networks:
+  # Named explicitly so observability/docker-compose.yaml (a separate Compose
+  # project) can join it as an external network and reach the app by service
+  # name, rather than depending on Compose's project-derived default name.
+  default:
+    name: sdip

@@ -1,0 +1,102 @@
+# Optional observability stack: OpenTelemetry Collector, Prometheus, Loki,
+# Tempo, and Grafana. Not part of the app's own compose files — most of the
+# time you don't need it running. Bring it up separately, alongside whichever
+# app stack is already running:
+#
+#   docker compose -f observability/docker-compose.yaml up -d
+#
+# Then point the app at the collector by setting, in the app stack's .env:
+#
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+#
+# That hostname only resolves if the app container is on the same Docker
+# network as the collector. SDIP_NETWORK picks which one to join — the app's
+# docker-compose.yaml calls its network "sdip", docker-compose.prod.yaml
+# calls its "sdip-prod"; the default below matches local dev. The network is
+# external and must already exist (i.e. the app stack must be up first) —
+# `docker network create sdip` by hand if you want this stack running
+# without the app.
+#
+# On a shared host reachable from the internet (i.e. one of the AWS
+# instances — see observability/README.md), only the collector's OTLP ports
+# are meant to be reached from outside: they're bound to every interface so a
+# *different* instance can reach them too, gated by that instance's AWS
+# security group rather than by network isolation. Everything else — Grafana,
+# Prometheus, Tempo, Loki — binds to loopback only; reach those over an SSM
+# port-forward or SSH tunnel, never by opening more inbound ports.
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.159.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.14.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      # The collector pushes metrics rather than being scraped, so it can
+      # forward whatever the app reports without a second config to keep in
+      # sync with the app's metric names.
+      - --web.enable-remote-write-receiver
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.7.1
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    volumes:
+      - ./loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "127.0.0.1:3100:3100"
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.10.8
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "127.0.0.1:3200:3200" # query API, used by Grafana
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3030:3000"
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  loki-data:
+  tempo-data:
+  grafana-data:
+
+networks:
+  default:
+    name: ${SDIP_NETWORK:-sdip}
+    external: true

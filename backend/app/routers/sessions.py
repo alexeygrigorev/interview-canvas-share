@@ -20,6 +20,7 @@ from ..models import (
     User,
 )
 from ..store import DatabaseStore, get_store
+from ..telemetry import sessions_created_counter
 from .dependencies import require_session_for_principal, require_session_manager
 from .realtime import broadcast_message
 
@@ -45,13 +46,15 @@ def create_session(
     current_user: User = Depends(get_current_user),
     store: DatabaseStore = Depends(get_store),
 ) -> InterviewSession:
-    return store.create_session(
+    created = store.create_session(
         owner_user_id=current_user.id,
         title=payload.title,
         prompt=payload.prompt,
         duration_minutes=payload.duration_minutes,
         scheduled_at=payload.scheduled_at,
     )
+    sessions_created_counter.add(1)
+    return created
 
 
 def _transition(

@@ -166,6 +166,11 @@ All settings are environment variables passed with `-e`:
 | `SDIP_DB_POOL_SIZE` | `5` | PostgreSQL connection pool size (ignored on SQLite) |
 | `SDIP_DB_MAX_OVERFLOW` | `10` | Extra PostgreSQL connections allowed under burst |
 | `SDIP_DB_POOL_RECYCLE` | `1800` | Seconds before a pooled connection is reopened |
+| `SDIP_ENVIRONMENT` | `development` | Deployment environment name, reported on every trace and metric |
+| `SDIP_GIT_COMMIT` | `unknown` | Deployed commit SHA, reported as the OpenTelemetry service version |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | OTLP endpoint traces and metrics export to — unset means telemetry is off |
+| `OTEL_EXPORTER_OTLP_HEADERS` | unset | Extra headers (e.g. an API key) sent with every OTLP export |
+| `OTEL_SERVICE_NAME` | `sdip-backend` | Service name reported to the OTLP backend |
 
 Set `SDIP_JWT_SECRET` to a real secret before running this anywhere but your
 own machine:
@@ -187,6 +192,27 @@ docker run --rm -p 8000:8000 \
   -e SDIP_DATABASE_URL=sqlite:////data/sdip.db \
   --name sdip sdip:latest
 ```
+
+### Telemetry
+
+The backend instruments FastAPI and its SQLAlchemy engine with
+[OpenTelemetry](https://opentelemetry.io/), exporting traces and metrics as
+OTLP. There is no collector in front of this yet, so export goes straight to
+whatever `OTEL_EXPORTER_OTLP_ENDPOINT` names — leave it unset and telemetry is
+a no-op, including in tests, which never attempt a network call.
+
+```sh
+docker run --rm -p 8000:8000 \
+  -e OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp.example.com \
+  -e OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer some-token" \
+  -e SDIP_ENVIRONMENT=production \
+  -e SDIP_GIT_COMMIT=$(git rev-parse HEAD) \
+  --name sdip sdip:latest
+```
+
+Every span and metric carries `service.name` (`OTEL_SERVICE_NAME`),
+`deployment.environment` (`SDIP_ENVIRONMENT`), and `service.version`
+(`SDIP_GIT_COMMIT`) as resource attributes.
 
 ## Deploy to AWS
 
@@ -233,6 +259,10 @@ instead:
   `production`) and `Project=sdip`, set with `--tags` on
   `aws cloudformation deploy`. Visible in the CloudFormation and Cost Explorer
   consoles without opening either template.
+- **The app's own `SDIP_ENVIRONMENT`** — bootstrap writes the stack's
+  `GitHubEnvironment` parameter (`dev` / `production`) into `/opt/sdip/.env`,
+  so it lands on every trace and metric the app exports (see "Telemetry"
+  below) without needing to be set by hand.
 - **Separate GitHub deploy roles per stack** — each stack's `GitHubEnvironment`
   parameter matches its own name (`dev` / `production`), so each has its own
   `GitHubDeployRole` trusting only its own environment's OIDC subject. The two
