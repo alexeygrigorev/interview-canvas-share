@@ -221,3 +221,6 @@ jobs:
         run: gh variable set SDIP_DEV_DEPLOYED_SHA --body "$GITHUB_SHA"
         env:
           GH_TOKEN: ${{ github.token }}
+          # gh infers owner/repo from a git checkout, which this job never
+          # does - point it at the repo explicitly instead.
+          GH_REPO: ${{ github.repository }}
