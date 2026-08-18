@@ -76,6 +76,35 @@ def _id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex[:12]}"
 
 
+_COMPONENT_KINDS = {"node", "text", "note"}
+_DEDUPE_GRID = 16
+
+
+def _dedupe_duplicate_components(
+    elements: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Drop components re-sent by a double-fired create event.
+
+    A duplicate create (e.g. a pointer event that fires twice) lands two
+    components of the same type stacked at the same spot in one save; keep
+    only the first.
+    """
+    seen: set[tuple[object, int, int]] = set()
+    deduped: list[dict[str, object]] = []
+    for element in elements:
+        if element.get("kind") in _COMPONENT_KINDS:
+            key = (
+                element.get("componentType"),
+                round(float(element.get("x", 0)) / _DEDUPE_GRID),
+                round(float(element.get("y", 0)) / _DEDUPE_GRID),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+        deduped.append(element)
+    return deduped
+
+
 def hash_credential(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -1100,12 +1129,13 @@ class DatabaseStore:
                 return None
             now = utcnow()
             previous_count = len(canvas.elements)
-            canvas.elements = [
+            dumped_elements = [
                 element.model_dump(mode="json", by_alias=True)
                 if hasattr(element, "model_dump")
                 else element
                 for element in elements
             ]  # type: ignore[union-attr,misc]
+            canvas.elements = _dedupe_duplicate_components(dumped_elements)
             # A save is a full snapshot, not an incremental edit, so growth in
             # element count is the closest thing to a "created" event.
             added = len(canvas.elements) - previous_count
